@@ -1,12 +1,14 @@
-# KG_700_BatchSemanticSearcher_v6_for_excel.py
+# KG_700_BatchSemanticSearcher_v7_for_excel.py
 import os
 import re
 import sys
 import json
 import torch
 import requests
+import jieba
 import time  
 import pandas as pd
+from openpyxl import Workbook
 from collections import Counter
 from typing import List, Dict, Any, Optional
 from dotenv import load_dotenv
@@ -20,7 +22,10 @@ from ts_prompt import (
     get_compensation_prompt_part1_single_plaintiff,
     get_compensation_prompt_part1_multiple_plaintiffs,
     get_compensation_prompt_part3,
+    get_compensation_prompt_from_raw_input
 )
+from KG_110_input_enhancer import register_to_jieba
+register_to_jieba()
 
 
 
@@ -168,7 +173,8 @@ def query_laws(case_ids):
                         law_text_map[n] = t
     return counter, law_text_map
 
-def keyword_law_filter(fact_text: str, injury_text: str, compensation_text: str) -> List[str]:
+def keyword_law_filter(fact_text: str, injury_text: str, compensation_text: str, parties: dict) -> List[str]:
+
     """從三段事實中比對出命中的法條條號"""
     legal_mapping = {
         "民法第184條第1項前段": ["未注意", "過失", "損害賠償", "侵害他人", "侵害權利"],
@@ -181,17 +187,28 @@ def keyword_law_filter(fact_text: str, injury_text: str, compensation_text: str)
         "民法第213條": ["回復原狀", "回復", "給付金錢", "損害發生"],
         "民法第216條": ["填補損害", "所失利益", "預期利益", "損失補償"],
         "民法第217條": ["被害人與有過失", "過失相抵", "重大損害原因", "損害擴大"],
-        "民法第190條": ["動物", "寵物", "狗", "貓", "動物攻擊", "動物咬傷"],
+        "民法第190條": ["動物", "寵物", "狗", "貓", "犬", "動物咬傷"],
 
     }
 
+    # 整理三段文字合併比對
     combined_text = "。".join([fact_text, injury_text, compensation_text])
     matched = set()
+
     for law, keywords in legal_mapping.items():
         if any(k in combined_text for k in keywords):
             matched.add(law)
 
-    print("📌 關鍵字命中的法條:", matched)
+    # 🔥 角色感知補強邏輯加入：
+    被告人數 = 0
+    if parties.get("被告") and parties["被告"] != "未提及":
+        被告人數 = len(parties["被告"].replace("、", " ").split())
+
+
+    if 被告人數 >= 2:
+        matched.add("民法第185條")
+
+    print("📌 強化角色感知後命中的法條:", matched)
     return sorted(matched)
 
 
@@ -437,9 +454,6 @@ def generate_final_prompt(
     
 
 
-
-
-
 def generate_case_summary(text):
     print("\n生成案件摘要...")
     facts, injuries = extract_facts_and_injuries(text)
@@ -472,7 +486,7 @@ def get_laws_prompt(article_ids: List[str], law_descriptions: dict) -> str:
     law_text_block = "、\n".join(law_segments)
     article_list = "、".join(article_ids)
 
-    return f"""你是一位熟悉台灣民事訴訟的律師助理。請依據下列條文說明與條號，撰寫起訴書中的「二、法律依據」段落，格式需正式、客觀，不得過度推論或加入未提供事實。
+    return f"""你是一位熟悉台灣民事訴訟的律師助理。請依據下列條文說明與條號，撰寫法律依據段落，格式需正式、客觀，不得過度推論或加入未提供事實。
 
 【條文說明】
 {law_text_block}
@@ -482,10 +496,7 @@ def get_laws_prompt(article_ids: List[str], law_descriptions: dict) -> str:
 
 請依以下格式撰寫：
 
-按「（條文簡述1）」、
-「（條文簡述2）」...，
-民法第XXX條、第YYY條...分別定有明文。
-查被告因上開侵權行為，致原告受有下列損害，依前揭規定，被告應負損害賠償責任：
+按「（條文簡述1）」、「（條文簡述2）」...，民法第XXX條、第YYY條...分別定有明文。查被告因上開侵權行為，致原告受有下列損害，依前揭規定，被告應負損害賠償責任：
 """
 
 # 法條條文說明表
@@ -514,10 +525,14 @@ def generate_four_parts(
     comp_details: list,
     avg_amount: float,
     plaintiffs_info: str = "",
-    top_law_numbers: List[str] = None
-) -> dict:
-    """四段式生成起訴狀（回傳每段 prompt 與合併內容）"""
+    top_law_numbers: List[str] = None,
+    raw_comp_text: str = ""
+) -> str:
+    """
+    四段式生成起訴狀，使用 raw_comp_text 作為損害段輸入，清理標題與附件語句。
+    """
 
+    # 🟦 第一段：事故發生經過
     print("\n📍開始生成第一段（事故發生經過）...")
     facts_prompt = get_facts_prompt(accident_facts, reference_facts)
     facts_resp = requests.post(
@@ -525,9 +540,12 @@ def generate_four_parts(
         json={"model": "gemma3:27b", "prompt": facts_prompt, "stream": False}
     )
     facts_result = facts_resp.json()["response"].strip() if facts_resp.ok else "⚠️ 無法生成事實段落"
+    facts_result = re.sub(r'^一[、.． ]+', '', facts_result)
+    facts_result = "一、事實概述：\n" + facts_result
 
     time.sleep(1)
 
+    # 🟧 第二段：法律依據
     print("\n📍開始生成第二段（法律依據）...")
     laws_prompt = get_laws_prompt(top_law_numbers, law_descriptions_dict)
     laws_resp = requests.post(
@@ -535,30 +553,29 @@ def generate_four_parts(
         json={"model": "gemma3:27b", "prompt": laws_prompt, "stream": False}
     )
     laws_result = laws_resp.json()["response"].strip() if laws_resp.ok else "⚠️ 無法生成法律段落"
+    laws_result = re.sub(r'^#+ *二[、.． ]*法律依據[:：]?', '', laws_result)
+    laws_result = "二、法律依據：\n" + laws_result
 
     time.sleep(1)
 
+    # 🟥 第三段：損害項目（使用 raw_comp_text）
     print("\n📍開始生成第三段（損害項目）...")
-    if "、" in plaintiffs_info or "、" in plaintiffs_info:
-        comp_prompt = get_compensation_prompt_part1_multiple_plaintiffs(
-            injuries, "\n".join(comp_details),
-            average_compensation=avg_amount,
-            plaintiffs_info=plaintiffs_info
-        )
-    else:
-        comp_prompt = get_compensation_prompt_part1_single_plaintiff(
-            injuries, "\n".join(comp_details),
-            average_compensation=avg_amount,
-            plaintiffs_info=plaintiffs_info
-        )
+    comp_prompt = get_compensation_prompt_from_raw_input(
+        raw_text=raw_comp_text,
+        avg=avg_amount,
+        plaintiffs_info=plaintiffs_info
+    )
     comp_resp = requests.post(
         "http://localhost:11434/api/generate",
         json={"model": "gemma3:27b", "prompt": comp_prompt, "stream": False}
     )
     comp_result = comp_resp.json()["response"].strip() if comp_resp.ok else "⚠️ 無法生成損害段落"
+    comp_result = re.sub(r'(詳如附件.*?|附件.*?所示)', '', comp_result)
+    comp_result = "三、損害項目：\n" + comp_result
 
     time.sleep(1)
 
+    # 🟩 第四段：結論
     print("\n📍開始生成第四段（結論）...")
     conclusion_prompt = get_compensation_prompt_part3(comp_result, "請求如上所列", plaintiffs_info=plaintiffs_info)
     con_resp = requests.post(
@@ -566,23 +583,11 @@ def generate_four_parts(
         json={"model": "gemma3:27b", "prompt": conclusion_prompt, "stream": False}
     )
     conclusion_result = con_resp.json()["response"].strip() if con_resp.ok else "⚠️ 無法生成結論段落"
-
-    # 加上段落標題（不清洗任何語句）
-    facts_result = "一、事實概述：" + facts_result
-    laws_result = "二、法律依據：" + laws_result
-    comp_result = "三、損害項目：" + comp_result
     conclusion_result = "四、結論：" + conclusion_result
 
-    return {
-        "facts_prompt": facts_prompt,
-        "laws_prompt": laws_prompt,
-        "comp_prompt": comp_prompt,
-        "conclusion_prompt": conclusion_prompt,
-        "full_text": "\n\n".join([facts_result, laws_result, comp_result, conclusion_result]),
-        "search_type": "2",  # 固定為 fact
-        "top_k": 3,
-        "grab_type": "2"  # 固定為 law+conclusion
-    }
+    # 🧾 組裝
+    return "\n\n".join([facts_result, laws_result, comp_result, conclusion_result])
+
 
 
 def generate_compensation_facts_snippet(details: list) -> str:
@@ -591,9 +596,9 @@ def generate_compensation_facts_snippet(details: list) -> str:
     return "\n".join(f"- {d.strip()}" for d in details if d and isinstance(d, str))
 
 
-def process_query(query_text: str):
+def process_query(query_text: str, return_text: bool = False):
     print("🔍 處理用戶查詢分類...")
-
+    
     # 1️⃣ 抽取姓名與類型
     party_info_raw = get_people(query_text)
     parties = extract_parties_from(party_info_raw)
@@ -606,11 +611,12 @@ def process_query(query_text: str):
         case_type = case_type[0]
     print("案件類型:", case_type)
 
-    # 2️⃣ 選擇搜尋參數
-    search_type = "2"
+    # 自動固定選擇參數
+    search_type = "2"   # 直接選擇 fact
     index_label = "Facts"
-    top_k = 3
-    grab_type = "2"
+    top_k = 3           # 直接選擇 Top-K = 3
+    grab_type = "2"     # 直接選擇 law+conclusion
+
 
     # 3️⃣ ES 搜尋
     hits = es_search(embed(query_text), case_type, top_k, label=index_label)
@@ -649,6 +655,13 @@ def process_query(query_text: str):
     # 6️⃣ 案件摘要 by Gemma
     print("\n📋 案件摘要（Gemma 逐行生成中）...\n")
     accident_facts, injuries = extract_facts_and_injuries(query_text)
+    # ⏬ 抽取「三、請求賠償的事實根據」段落作為損害輸入
+    def extract_raw_compensation_text(user_input: str) -> str:
+        match = re.search(r"三[、.．：:]?\s*請求賠償的事實根據[:：]?\s*(.*)", user_input, re.S)
+        return match.group(1).strip() if match else ""
+
+    raw_comp_text = extract_raw_compensation_text(query_text)
+
     summary_prompt = get_case_summary_prompt(accident_facts, injuries)
     response = requests.post(
         "http://localhost:11434/api/generate",
@@ -689,13 +702,13 @@ def process_query(query_text: str):
     comp_facts = generate_compensation_facts_snippet(comp_details)
 
     # 9️⃣ 四段式 LLM 生成
-    top_law_numbers = keyword_law_filter(accident_facts, injuries, comp_facts)
+    top_law_numbers = keyword_law_filter(accident_facts, injuries, comp_facts, parties)
     top_law_texts = [law_texts[l] for l in top_law_numbers if l in law_texts]
     if not top_law_texts:
         top_law_texts = list(law_texts.values())[:3]  # fallback
 
 
-    generated = generate_four_parts(
+    full_text = generate_four_parts(
         user_query=query_text,
         accident_facts=accident_facts,
         injuries=injuries,
@@ -705,53 +718,83 @@ def process_query(query_text: str):
         comp_details=comp_details,
         avg_amount=avg,
         plaintiffs_info=parties.get("原告", ""),
-        top_law_numbers=top_law_numbers
+        top_law_numbers=top_law_numbers,
+        raw_comp_text=raw_comp_text  # ✅ 新增這行
     )
 
-    facts_prompt = generated["facts_prompt"]
-    laws_prompt = generated["laws_prompt"]
-    comp_prompt = generated["comp_prompt"]
-    conclusion_prompt = generated["conclusion_prompt"]
-    full_text = generated["full_text"]
+    if return_text:
+        return full_text
+    else:
+        print("\n📑 最終生成的四段起訴狀：\n")
+        print(full_text)
 
 
-    # 🔟 顯示最終結果
-    print("\n📑 最終生成的四段起訴狀：\n")
-    result_row = {
-        "case_id": top1_case_id,
-        "語意相似句集合": "\n".join([
-            f"Case {hit['_source']['case_id']}（{hit['_score']:.4f}）➜ {hit['_source'].get('original_text', '').strip()}"
-            for hit in hits
-        ]),
-        "TopN案例彙整": "\n".join([
-            f"{i+1}. Case {cid}"
-            for i, cid in enumerate(case_ids)
-        ]),
-        "一、事實概述 Prompt": facts_prompt,
-        "二、法律依據 Prompt": laws_prompt,
-        "三、損害項目 Prompt": comp_prompt,
-        "四、結論 Prompt": conclusion_prompt,
-        "四段合併起訴書": full_text
-}
-    results.append(result_row)
+import pandas as pd
 
+def select_excel_sheet(file_path):
+    """
+    自動顯示所有 sheet 供使用者選擇
+    """
+    xl = pd.ExcelFile(file_path)
+    print(f"✅ 讀取成功！此檔案共有 {len(xl.sheet_names)} 個工作表：")
+    for idx, sheet in enumerate(xl.sheet_names):
+        print(f"{idx+1}: {sheet}")
 
-# --- 檔案最下方 ---
+    while True:
+        try:
+            choice = int(input("請輸入要使用的工作表編號: "))
+            if 1 <= choice <= len(xl.sheet_names):
+                return xl.sheet_names[choice - 1]
+            else:
+                print("❌ 無效編號，請重新輸入。")
+        except:
+            print("❌ 請輸入有效的整數編號。")
+            
 
-# ✅ 全域變數，收集每筆處理結果
-results = []
-
+# 模擬你的原本程式的入口
 if __name__ == "__main__":
-    import pandas as pd
 
-    df = pd.read_excel("律師輸入.xlsx", sheet_name="律師輸入")
-    for i, row in df.iterrows():
-        print(f"\n📌 處理第 {i+1} 筆律師輸入...")
-        query_text = row["律師輸入"]
-        if isinstance(query_text, str) and query_text.strip():
-            process_query(query_text.strip())
+    # 讀取 Excel
+    input_path = input("📥 請輸入律師輸入 Excel 檔案路徑: ").strip()
+    output_path = input("📤 請輸入輸出 Excel 檔案名稱: ").strip()
 
-    # ✅ 最後統一儲存所有結果
-    if results:
-        pd.DataFrame(results).to_excel("匯出結果.xlsx", index=False, engine="openpyxl")
-        print("\n✅ 所有結果已匯出至 '匯出結果.xlsx'")
+    # 自動顯示所有 sheet 給你選
+    sheet_name = select_excel_sheet(input_path)
+
+    # 讀取選定的 sheet
+    df = pd.read_excel(input_path, sheet_name=sheet_name)
+
+    # 讓你指定欄位
+    default_column = "律師輸入"
+    input_col = input(f"🔎 請輸入律師輸入欄位名稱（預設『{default_column}』）: ").strip() or default_column
+
+    if input_col not in df.columns:
+        print(f"❌ 欄位 '{input_col}' 不存在於資料中，請確認欄位名稱正確。")
+        exit()
+
+    results = []
+
+    # 這裡你就接回你目前的 process_query() 批次執行即可
+    for idx, row in df.iterrows():
+        user_input = row.get(input_col, "")
+        if not isinstance(user_input, str) or not user_input.strip():
+            print(f"❌ 第 {idx} 筆缺少律師輸入，略過")
+            continue
+
+        print(f"\n🚧 處理第 {idx} 筆律師輸入...")
+        try:
+            full_text = process_query(user_input, return_text=True)
+            results.append({
+                "case_id": row.get("case_id", idx + 1),
+                "律師輸入": user_input,
+                "起訴狀草稿": full_text
+            })
+        except Exception as e:
+            print(f"❌ 第 {idx} 筆處理失敗：{str(e)}")
+            continue
+
+    # 匯出結果
+    df_out = pd.DataFrame(results)
+    df_out.to_excel(output_path, index=False)
+    print(f"\n✅ 已將結果匯出至 {output_path}")
+

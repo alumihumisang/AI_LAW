@@ -240,3 +240,22 @@ def get_compensation_prompt_part1_without_avg(injuries, compensation_facts):
 損失情況：
 {compensation_facts}
 """
+
+def get_compensation_prompt_from_raw_input(raw_text, avg=None, plaintiffs_info=""):
+    avg_text = f"請注意：類似案件的平均賠償金額為 {avg:.0f} 元，僅供參考。\n\n" if avg else ""
+    p_text = f"原告資訊：{plaintiffs_info}\n\n" if plaintiffs_info else ""
+    return f"""{p_text}
+你是一位台灣原告律師，請根據以下原告的請求賠償段落內容，撰寫「三、損害項目」段落。請條列出所有請求項目，每項需包含損害名稱、金額、與損害說明。不得加入未出現在輸入中的項目，也不得出現「附件」相關語句。
+
+輸入段落如下：
+{raw_text}
+
+格式要求：
+- 使用（一）（二）…條列
+- 每段需含金額與原因
+- 金額使用阿拉伯數字加「元」
+- 禁止使用「詳如附件」「附件所示」
+- 不要自己加入標題（如三、損害項目）或結論文字
+{avg_text}
+請開始撰寫。
+"""

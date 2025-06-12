@@ -5,7 +5,8 @@ import sys
 import json
 import torch
 import requests
-import time  # 為避免太快請求 LLM，可加短暫 sleep
+import jieba
+import time  
 from collections import Counter
 from typing import List, Dict, Any, Optional
 from dotenv import load_dotenv
@@ -19,8 +20,10 @@ from ts_prompt import (
     get_compensation_prompt_part1_single_plaintiff,
     get_compensation_prompt_part1_multiple_plaintiffs,
     get_compensation_prompt_part3,
+    get_compensation_prompt_from_raw_input
 )
-
+from KG_110_input_enhancer import register_to_jieba
+register_to_jieba()
 
 
 # 自動載入環境變數
@@ -468,7 +471,7 @@ def get_laws_prompt(article_ids: List[str], law_descriptions: dict) -> str:
     law_text_block = "、\n".join(law_segments)
     article_list = "、".join(article_ids)
 
-    return f"""你是一位熟悉台灣民事訴訟的律師助理。請依據下列條文說明與條號，撰寫起訴書中的「二、法律依據」段落，格式需正式、客觀，不得過度推論或加入未提供事實。
+    return f"""你是一位熟悉台灣民事訴訟的律師助理。請依據下列條文說明與條號，撰寫法律依據段落，格式需正式、客觀，不得過度推論或加入未提供事實。
 
 【條文說明】
 {law_text_block}
@@ -478,10 +481,7 @@ def get_laws_prompt(article_ids: List[str], law_descriptions: dict) -> str:
 
 請依以下格式撰寫：
 
-按「（條文簡述1）」、
-「（條文簡述2）」...，
-民法第XXX條、第YYY條...分別定有明文。
-查被告因上開侵權行為，致原告受有下列損害，依前揭規定，被告應負損害賠償責任：
+按「（條文簡述1）」、「（條文簡述2）」...，民法第XXX條、第YYY條...分別定有明文。查被告因上開侵權行為，致原告受有下列損害，依前揭規定，被告應負損害賠償責任：
 """
 
 # 法條條文說明表
@@ -510,10 +510,14 @@ def generate_four_parts(
     comp_details: list,
     avg_amount: float,
     plaintiffs_info: str = "",
-    top_law_numbers: List[str] = None
+    top_law_numbers: List[str] = None,
+    raw_comp_text: str = ""
 ) -> str:
-    """四段式生成起訴狀（保留原始內容，不進行文字清洗）"""
+    """
+    四段式生成起訴狀，使用 raw_comp_text 作為損害段輸入，清理標題與附件語句。
+    """
 
+    # 🟦 第一段：事故發生經過
     print("\n📍開始生成第一段（事故發生經過）...")
     facts_prompt = get_facts_prompt(accident_facts, reference_facts)
     facts_resp = requests.post(
@@ -521,9 +525,12 @@ def generate_four_parts(
         json={"model": "gemma3:27b", "prompt": facts_prompt, "stream": False}
     )
     facts_result = facts_resp.json()["response"].strip() if facts_resp.ok else "⚠️ 無法生成事實段落"
+    facts_result = re.sub(r'^一[、.． ]+', '', facts_result)
+    facts_result = "一、事實概述：\n" + facts_result
 
     time.sleep(1)
 
+    # 🟧 第二段：法律依據
     print("\n📍開始生成第二段（法律依據）...")
     laws_prompt = get_laws_prompt(top_law_numbers, law_descriptions_dict)
     laws_resp = requests.post(
@@ -531,30 +538,29 @@ def generate_four_parts(
         json={"model": "gemma3:27b", "prompt": laws_prompt, "stream": False}
     )
     laws_result = laws_resp.json()["response"].strip() if laws_resp.ok else "⚠️ 無法生成法律段落"
+    laws_result = re.sub(r'^#+ *二[、.． ]*法律依據[:：]?', '', laws_result)
+    laws_result = "二、法律依據：\n" + laws_result
 
     time.sleep(1)
 
+    # 🟥 第三段：損害項目（使用 raw_comp_text）
     print("\n📍開始生成第三段（損害項目）...")
-    if "、" in plaintiffs_info or "、" in plaintiffs_info:
-        comp_prompt = get_compensation_prompt_part1_multiple_plaintiffs(
-            injuries, "\n".join(comp_details),
-            average_compensation=avg_amount,
-            plaintiffs_info=plaintiffs_info
-        )
-    else:
-        comp_prompt = get_compensation_prompt_part1_single_plaintiff(
-            injuries, "\n".join(comp_details),
-            average_compensation=avg_amount,
-            plaintiffs_info=plaintiffs_info
-        )
+    comp_prompt = get_compensation_prompt_from_raw_input(
+        raw_text=raw_comp_text,
+        avg=avg_amount,
+        plaintiffs_info=plaintiffs_info
+    )
     comp_resp = requests.post(
         "http://localhost:11434/api/generate",
         json={"model": "gemma3:27b", "prompt": comp_prompt, "stream": False}
     )
     comp_result = comp_resp.json()["response"].strip() if comp_resp.ok else "⚠️ 無法生成損害段落"
+    comp_result = re.sub(r'(詳如附件.*?|附件.*?所示)', '', comp_result)
+    comp_result = "三、損害項目：\n" + comp_result
 
     time.sleep(1)
 
+    # 🟩 第四段：結論
     print("\n📍開始生成第四段（結論）...")
     conclusion_prompt = get_compensation_prompt_part3(comp_result, "請求如上所列", plaintiffs_info=plaintiffs_info)
     con_resp = requests.post(
@@ -562,14 +568,12 @@ def generate_four_parts(
         json={"model": "gemma3:27b", "prompt": conclusion_prompt, "stream": False}
     )
     conclusion_result = con_resp.json()["response"].strip() if con_resp.ok else "⚠️ 無法生成結論段落"
-
-    # 加上段落標題（不清洗任何語句）
-    facts_result = "一、事實概述：" + facts_result
-    laws_result = "二、法律依據：" + laws_result
-    comp_result = "三、損害項目：" + comp_result
     conclusion_result = "四、結論：" + conclusion_result
 
+    # 🧾 組裝
     return "\n\n".join([facts_result, laws_result, comp_result, conclusion_result])
+
+
 
 def generate_compensation_facts_snippet(details: list) -> str:
     if not details:
@@ -579,6 +583,10 @@ def generate_compensation_facts_snippet(details: list) -> str:
 
 def process_query(query_text: str):
     print("🔍 處理用戶查詢分類...")
+    
+    print("\n🧪 斷詞測試（含新詞表）:")
+    test = "原告於事故中受有腦震盪及左膝蓋骨裂，須休養三個月。"
+    print("/".join(jieba.cut(test)))
 
     # 1️⃣ 抽取姓名與類型
     party_info_raw = get_people(query_text)
@@ -635,6 +643,13 @@ def process_query(query_text: str):
     # 6️⃣ 案件摘要 by Gemma
     print("\n📋 案件摘要（Gemma 逐行生成中）...\n")
     accident_facts, injuries = extract_facts_and_injuries(query_text)
+    # ⏬ 抽取「三、請求賠償的事實根據」段落作為損害輸入
+    def extract_raw_compensation_text(user_input: str) -> str:
+        match = re.search(r"三[、.．：:]?\s*請求賠償的事實根據[:：]?\s*(.*)", user_input, re.S)
+        return match.group(1).strip() if match else ""
+
+    raw_comp_text = extract_raw_compensation_text(query_text)
+
     summary_prompt = get_case_summary_prompt(accident_facts, injuries)
     response = requests.post(
         "http://localhost:11434/api/generate",
@@ -688,12 +703,13 @@ def process_query(query_text: str):
         summary=summary,
         reference_facts=full_sections.get("facts", ""),
         law_texts=top_law_texts,
-
         comp_details=comp_details,
         avg_amount=avg,
         plaintiffs_info=parties.get("原告", ""),
-        top_law_numbers=top_law_numbers
+        top_law_numbers=top_law_numbers,
+        raw_comp_text=raw_comp_text  # ✅ 新增這行
     )
+
 
     # 🔟 顯示最終結果
     print("\n📑 最終生成的四段起訴狀：\n")
