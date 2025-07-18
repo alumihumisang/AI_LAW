@@ -1,0 +1,19 @@
+{
+  "session_name": "continue_remaining_cases",
+  "start_time": "2025-06-17T14:06:24.590596",
+  "total_cases": 2995,
+  "processed_count": 2995,
+  "failed_count": 0,
+  "current_batch": 62,
+  "case_types": {
+    "單純原被告各一": 2388,
+    "§188僱用人案型": 123,
+    "§187未成年案型": 55,
+    "數名原告": 214,
+    "數名被告": 170,
+    "原被告皆數名": 23,
+    "§190動物案型": 22
+  },
+  "completed": true,
+  "progress_percentage": 100.0
+}
