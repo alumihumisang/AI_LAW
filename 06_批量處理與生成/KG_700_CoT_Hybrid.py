@@ -46,15 +46,6 @@ except ImportError:
     BASIC_STANDARDIZER_AVAILABLE = False
     print("⚠️ 基本金額標準化器未找到")
 
-# 導入通用格式處理器
-try:
-    from universal_format_handler import UniversalFormatHandler
-    UNIVERSAL_FORMAT_HANDLER_AVAILABLE = True
-    print("✅ 通用格式處理器載入成功")
-except ImportError:
-    UNIVERSAL_FORMAT_HANDLER_AVAILABLE = False
-    print("⚠️ 通用格式處理器未找到")
-
 # ===== 基本設定 =====
 LLM_URL = "http://localhost:11434/api/generate"
 DEFAULT_MODEL = "gemma3:27b"
@@ -152,94 +143,32 @@ def extract_sections(text: str) -> dict:
     return result
 
 def extract_parties_with_llm(text: str) -> dict:
-    """使用LLM提取當事人（增強版 - 更好的泛化能力）"""
-    print("🤖 使用增強版LLM智能提取當事人...")
+    """使用LLM提取當事人（更準確的方法）"""
+    print("🤖 使用LLM智能提取當事人...")
     
-    # 嘗試使用語義輔助處理器
-    try:
-        from KG_700_Semantic_Universal import SemanticLegalProcessor
-        semantic_processor = SemanticLegalProcessor()
-        semantic_result = semantic_processor.extract_parties_semantically(text)
-        
-        # 轉換格式以符合原有接口
-        result = {}
-        
-        # 處理原告 - 加入嚴格驗證邏輯
-        plaintiffs = []
-        for p in semantic_result.get("原告", []):
-            if p.confidence > 0.3 and p.name != "原告":
-                # 嚴格驗證：必須確實是「原告○○○」的格式
-                if f"原告{p.name}" in text:
-                    plaintiffs.append(p.name)
-                else:
-                    print(f"⚠️ 語義提取的原告姓名 '{p.name}' 在原文中不存在或不是原告，跳過")
-        
-        result["原告"] = "、".join(plaintiffs) if plaintiffs else "原告"
-        
-        # 處理被告 - 加入嚴格驗證邏輯
-        defendants = []
-        for p in semantic_result.get("被告", []):
-            if p.confidence > 0.3 and p.name != "被告":
-                # 嚴格驗證：必須確實是「被告○○○」的格式
-                if f"被告{p.name}" in text:
-                    defendants.append(p.name)
-                else:
-                    print(f"⚠️ 語義提取的被告姓名 '{p.name}' 在原文中不存在或不是被告，跳過")
-        
-        result["被告"] = "、".join(defendants) if defendants else "被告"
-        
-        # 額外檢查：確保沒有把訴外人誤認為當事人
-        for outsider in semantic_result.get("訴外人", []):
-            if outsider.name in result["原告"]:
-                print(f"⚠️ 檢測到訴外人 '{outsider.name}' 被誤認為原告，移除")
-                result["原告"] = result["原告"].replace(outsider.name, "").replace("、、", "、").strip("、") or "原告"
-            if outsider.name in result["被告"]:
-                print(f"⚠️ 檢測到訴外人 '{outsider.name}' 被誤認為被告，移除")
-                result["被告"] = result["被告"].replace(outsider.name, "").replace("、、", "、").strip("、") or "被告"
-        
-        print(f"✅ 語義輔助提取成功: 原告={result['原告']}, 被告={result['被告']}")
-        
-        # 如果語義提取沒有找到有效姓名，則fallback到LLM方法
-        if result["原告"] == "原告" and result["被告"] == "被告":
-            print("⚠️ 語義提取未找到具體姓名，fallback到LLM方法")
-            # 不要返回，繼續執行LLM方法
-        else:
-            return result
-        
-    except Exception as e:
-        print(f"⚠️ 語義輔助不可用，使用原LLM方法: {e}")
-    
-    # 備用：增強的LLM提示詞
-    prompt = f"""請你幫我從以下車禍案件的法律文件中提取原告和被告的姓名。
+    # 創建更精確的提示模板
+    prompt = f"""請你幫我從以下車禍案件的法律文件中提取並列出所有原告和被告的真實姓名。
 
 以下是案件內容：
 {text}
 
-【關鍵提取規則】
-1. **只提取**「原告○○○」和「被告○○○」中的姓名
-2. **絕對不要提取**「訴外人○○○」的姓名 - 訴外人不是當事人！
-3. **重要檢查**：確保提取的姓名前面有「原告」或「被告」字樣
-4. 如果文中只有「原告」、「被告」而沒有具體姓名，就輸出「原告」、「被告」
-5. **不要搞混角色**：原告就是原告，被告就是被告
+提取要求：
+1. 僅提取「原告○○○」和「被告○○○」中明確提到的真實姓名
+2. 不要提取「訴外人」的姓名，訴外人不是當事人
+3. 完整保留姓名，不可截斷（如：鄭凱祥不能寫成鄭祥）
+4. 如果文中沒有明確的姓名，就直接寫「原告」、「被告」
+5. 多個姓名用逗號分隔
 
-【錯誤範例 - 絕對不要這樣做】
-❌ 把「訴外人王其能」當成原告 - 錯誤！
-❌ 把「原告」這個詞當成被告姓名 - 錯誤！ 
-❌ 把角色搞反 - 錯誤！
+輸出格式（只輸出這兩行）：
+原告:姓名1,姓名2...
+被告:姓名1,姓名2...
 
-【正確範例】
-✅ 「原告羅靖崴主張...」→ 原告:羅靖崴
-✅ 「被告張三駕駛...」→ 被告:張三
-✅ 「訴外人王其能購買...」→ 忽略（不是當事人）
-✅ 「原告主張賠償...」→ 原告:原告（沒有具體姓名）
-
-【特殊注意】
-在這個案例中，文中提到「訴外人王其能」，這是第三方，不是原告或被告！
-原告和被告在文中都沒有具體姓名，只用「原告」、「被告」稱呼。
-
-請仔細分析並輸出（只輸出這兩行）：
-原告:
-被告:"""
+範例說明：
+- 「原告吳麗娟」→ 原告:吳麗娟
+- 「被告鄭凱祥」→ 被告:鄭凱祥  
+- 「訴外人陳河田」→ 不是當事人，忽略
+- 如果只說「原告」沒有姓名 → 原告:原告
+- 如果只說「被告」沒有姓名 → 被告:被告"""
 
     try:
         # 調用LLM
@@ -265,71 +194,14 @@ def extract_parties_with_llm(text: str) -> dict:
         print(f"❌ LLM提取異常: {e}")
         return extract_parties_fallback(text)
 
-def _is_valid_name(name: str) -> bool:
-    """檢查是否是有效的姓名"""
-    import re
-    
-    # 排除包含數字、職業描述、年齡等的文字
-    invalid_patterns = [
-        r'\d+',  # 包含數字
-        r'歲',   # 年齡
-        r'先生|女士|小姐',  # 稱謂
-        r'經理|主任|司機|領班|員工',  # 職業
-        r'企業|公司|行號|店',  # 公司名稱
-        r'係|即|之|等|及|或',  # 連接詞
-        r'受僱人|僱用人|法定代理人',  # 法律用語
-    ]
-    
-    for pattern in invalid_patterns:
-        if re.search(pattern, name):
-            return False
-    
-    # 檢查是否是合理的中文姓名長度（2-4個字）
-    if len(name) < 2 or len(name) > 6:
-        return False
-    
-    # 檢查是否主要由中文字組成
-    chinese_chars = len(re.findall(r'[\u4e00-\u9fff]', name))
-    if chinese_chars < len(name) * 0.7:  # 至少70%是中文字
-        return False
-    
-    return True
-
-def _clean_name_text(text: str) -> str:
-    """清理姓名文字，移除非姓名內容"""
-    import re
-    
-    # 移除年齡、職業等描述
-    cleaned = re.sub(r'\d+歲', '', text)
-    cleaned = re.sub(r'先生|女士|小姐', '', cleaned)
-    cleaned = re.sub(r'（.*?）|\(.*?\)', '', cleaned)  # 移除括號內容
-    cleaned = re.sub(r'[，,]\s*\d+.*', '', cleaned)  # 移除逗號後的數字和描述
-    
-    # 提取可能的姓名（2-4個中文字的組合）
-    name_matches = re.findall(r'[\u4e00-\u9fff]{2,4}', cleaned)
-    if name_matches:
-        return name_matches[0]  # 返回第一個匹配的姓名
-    
-    return text.strip()
-
 def parse_llm_parties_result(llm_result: str) -> dict:
-    """解析LLM的當事人提取結果 - 增強版本防止角色混淆"""
+    """解析LLM的當事人提取結果"""
     result = {"原告": "原告", "被告": "被告", "被告數量": 1, "原告數量": 1}
     
     # 檢查LLM是否返回了無效的回應
     invalid_responses = ["請提供", "無法提取", "沒有提供", "由於您沒有"]
     if any(invalid in llm_result for invalid in invalid_responses):
         print("⚠️ LLM返回無效回應，使用fallback")
-        return result
-    
-    # 檢查是否出現了角色混淆的錯誤（常見bug）
-    if "原告:王其能" in llm_result and "被告:原告" in llm_result:
-        print("⚠️ 檢測到明顯的角色混淆錯誤，使用安全默認值")
-        return result
-    
-    # 檢查是否把訴外人當成了當事人
-    if "王其能" in llm_result:
-        print("⚠️ 檢測到訴外人被誤認為當事人，使用安全默認值")
         return result
     
     lines = llm_result.split('\n')
@@ -339,44 +211,18 @@ def parse_llm_parties_result(llm_result: str) -> dict:
         if line.startswith('原告:') or line.startswith('原告：'):
             plaintiff_text = line.split(':', 1)[1].strip() if ':' in line else line.split('：', 1)[1].strip()
             if plaintiff_text:
-                # 改進的分割邏輯：只有當確實有多個有效姓名時才分割
-                potential_plaintiffs = [p.strip() for p in plaintiff_text.split(',') if p.strip()]
-                # 驗證是否真的是多個姓名
-                valid_plaintiffs = []
-                for p in potential_plaintiffs:
-                    # 檢查是否是有效的姓名（不包含數字、不是描述性文字）
-                    if _is_valid_name(p):
-                        valid_plaintiffs.append(p)
-                
-                if len(valid_plaintiffs) > 1:
-                    result["原告"] = "、".join(valid_plaintiffs)
-                    result["原告數量"] = len(valid_plaintiffs)
-                else:
-                    # 單一原告或無法確定多個，使用原始文字但清理非姓名內容
-                    cleaned_name = _clean_name_text(plaintiff_text)
-                    result["原告"] = cleaned_name if cleaned_name else "原告"
-                    result["原告數量"] = 1
+                # 分割多個原告
+                plaintiffs = [p.strip() for p in plaintiff_text.split(',') if p.strip()]
+                result["原告"] = "、".join(plaintiffs)
+                result["原告數量"] = len(plaintiffs)
         
         elif line.startswith('被告:') or line.startswith('被告：'):
             defendant_text = line.split(':', 1)[1].strip() if ':' in line else line.split('：', 1)[1].strip()
             if defendant_text:
-                # 改進的分割邏輯：只有當確實有多個有效姓名時才分割
-                potential_defendants = [d.strip() for d in defendant_text.split(',') if d.strip()]
-                # 驗證是否真的是多個姓名
-                valid_defendants = []
-                for d in potential_defendants:
-                    # 檢查是否是有效的姓名
-                    if _is_valid_name(d):
-                        valid_defendants.append(d)
-                
-                if len(valid_defendants) > 1:
-                    result["被告"] = "、".join(valid_defendants)
-                    result["被告數量"] = len(valid_defendants)
-                else:
-                    # 單一被告或無法確定多個，使用原始文字但清理非姓名內容
-                    cleaned_name = _clean_name_text(defendant_text)
-                    result["被告"] = cleaned_name if cleaned_name else "被告"
-                    result["被告數量"] = 1
+                # 分割多個被告
+                defendants = [d.strip() for d in defendant_text.split(',') if d.strip()]
+                result["被告"] = "、".join(defendants)
+                result["被告數量"] = len(defendants)
     
     return result
 
@@ -675,26 +521,13 @@ def normalize_article_number(article: str) -> str:
     return article
 
 def detect_special_relationships(text: str, parties: dict) -> dict:
-    """偵測特殊法律關係（優化版 - 修復當事人數量檢測）"""
-    
-    # 正確計算當事人數量
-    plaintiff_count = len([name.strip() for name in parties.get('原告', '原告').split('、') if name.strip() and name.strip() != '原告'])
-    defendant_count = len([name.strip() for name in parties.get('被告', '被告').split('、') if name.strip() and name.strip() != '被告'])
-    
-    # 如果沒有具體姓名，當事人數量為1
-    if parties.get('原告', '') in ['原告', '']:
-        plaintiff_count = 1
-    if parties.get('被告', '') in ['被告', '']:
-        defendant_count = 1
-        
-    print(f"🔍 當事人數量檢測: 原告={plaintiff_count}人, 被告={defendant_count}人")
-    
+    """偵測特殊法律關係（優化版）"""
     relationships = {
         "未成年": False,
         "雇傭關係": False,
         "動物損害": False,
-        "多被告": defendant_count > 1,
-        "多原告": plaintiff_count > 1
+        "多被告": parties.get('被告數量', 1) > 1,
+        "多原告": parties.get('原告數量', 1) > 1   # 新增多原告判斷
     }
     
     # 更精確的未成年檢測
@@ -817,12 +650,6 @@ class HybridCoTGenerator:
         else:
             self.basic_standardizer = None
         
-        # 初始化通用格式處理器
-        if UNIVERSAL_FORMAT_HANDLER_AVAILABLE:
-            self.format_handler = UniversalFormatHandler()
-        else:
-            self.format_handler = None
-        
         # 檢查LLM連接
         self.llm_available = self._check_llm_connection()
     
@@ -851,7 +678,12 @@ class HybridCoTGenerator:
             )
             
             if response.status_code == 200:
-                return response.json()["response"].strip()
+                result = response.json()["response"]
+                # Ensure result is always a string
+                if isinstance(result, dict):
+                    print(f"⚠️ LLM returned dict instead of string: {result}")
+                    result = str(result)
+                return result.strip() if isinstance(result, str) else str(result).strip()
             else:
                 return f"❌ LLM API錯誤: {response.status_code}"
                 
@@ -884,7 +716,7 @@ class HybridCoTGenerator:
         
         return unique_plaintiffs
     
-    def generate_standard_facts(self, accident_facts: str, similar_cases: List[str] = None, parties: dict = None) -> str:
+    def generate_standard_facts(self, accident_facts: str, similar_cases: List[str] = None) -> str:
         """標準方式生成事實段落（含相似案例參考）"""
         print("📝 使用標準方式生成事實段落...")
         
@@ -901,13 +733,12 @@ class HybridCoTGenerator:
 要求：
 1. 以「緣被告」開頭
 2. 使用「原告」、「被告」稱謂，但必須保持姓名的完整性和準確性
-3. 客觀描述事故經過，確保語法正確流暢
+3. 客觀描述事故經過
 4. 參考相似案例的敘述方式，但不得抄襲
 5. 格式：一、事實概述：[內容]
 6. **重要**：如果事實材料中有具體姓名，請完整保留，不要截斷或改變任何字元
 7. **禁止事項**：絕對不可以在輸出中包含任何括號提醒文字，如「（姓名：請填寫...）」、「（請填寫...）」等提示內容
 8. **直接輸出**：只輸出完整的事實段落，不要包含任何需要用戶填寫的空白或提醒
-9. **語法要求**：請特別注意句子結構的完整性，避免出現語法錯誤或不完整的句子
 
 請直接輸出完整的事實段落："""
         
@@ -916,29 +747,21 @@ class HybridCoTGenerator:
         # 清理括號提醒文字
         result = self._remove_bracket_reminders(result)
         
-        # 修正語法錯誤
-        result = self._fix_grammar_errors(result)
-        
         # 提取事實段落
         fact_match = re.search(r"一、事實概述：\s*(.*?)(?:\n\n|$)", result, re.S)
         if fact_match:
             cleaned_content = fact_match.group(1).strip()
-            result = f"一、事實概述：\n{cleaned_content}"
-            return self._standardize_names_in_facts(result, parties or {})
+            return f"一、事實概述：\n{cleaned_content}"
         elif "緣被告" in result:
             # 找到包含"緣被告"的行
             for line in result.split('\n'):
                 if "緣被告" in line:
                     cleaned_line = line.strip()
-                    result = f"一、事實概述：\n{cleaned_line}"
-                    return self._standardize_names_in_facts(result, parties or {})
+                    return f"一、事實概述：\n{cleaned_line}"
         
         # Fallback
         facts_content = accident_facts.replace('緣被告', '').strip()
-        result = f"一、事實概述：\n緣被告{facts_content}"
-        
-        # 統一姓名處理
-        return self._standardize_names_in_facts(result, parties or {})
+        return f"一、事實概述：\n緣被告{facts_content}"
     
     def generate_standard_laws(self, accident_facts: str, injuries: str, parties: dict, compensation_facts: str = "") -> str:
         """標準方式生成法律依據（符合法條引用規範）"""
@@ -973,18 +796,11 @@ class HybridCoTGenerator:
             law_texts = ["「因故意或過失，不法侵害他人之權利者，負損害賠償責任。」"]
             valid_laws = ["民法第184條第1項前段"]
         
-        # 按條號數字排序法條
-        sorted_laws_with_content = self._sort_laws_by_article_number(valid_laws, law_descriptions)
-        
-        # 提取排序後的內容和條號
-        sorted_law_texts = [item[1] for item in sorted_laws_with_content]
-        sorted_article_list = [item[0] for item in sorted_laws_with_content]
-        
         # 按正確格式組合：先法條內容，後條號
-        law_content_block = "、".join(sorted_law_texts)
-        article_list = "、".join(sorted_article_list)
+        law_content_block = "、".join(law_texts)
+        article_list = "、".join(valid_laws)
         
-        print(f"✅ 適用法條: {', '.join(sorted_article_list)}")
+        print(f"✅ 適用法條: {', '.join(valid_laws)}")
         
         return f"""二、法律依據：
 按{law_content_block}，{article_list}分別定有明文。查被告因上開侵權行為，致原告受有下列損害，依前揭規定，被告應負損害賠償責任："""
@@ -1001,7 +817,7 @@ class HybridCoTGenerator:
                 'template': f'原告{plaintiff}因本次事故受傷，前往醫院治療所支出之醫療費用'
             },
             {
-                'keywords': ['交通費', '交通費用', '往返費用', '來回費用', '車費', '油費', '停車費', '過路費', '通行費'],
+                'keywords': ['交通費'],
                 'name': '交通費用',
                 'template': f'原告{plaintiff}因本次事故所生之交通費用'
             },
@@ -1102,46 +918,6 @@ class HybridCoTGenerator:
         
         return cleaned_text
     
-    def _fix_grammar_errors(self, text: str) -> str:
-        """修正文本中的語法錯誤"""
-        import re
-        
-        cleaned_text = text
-        
-        # 修正常見的語法錯誤模式
-        grammar_fixes = [
-            # 修正「致撞擊車後之機車道上，由原告所騎乘...」類型的錯誤
-            (r'致撞擊車後之機車道上，由([^所]+)所騎乘([^普]+)普通重型機車', 
-             r'致撞擊\1所騎乘之\2普通重型機車'),
-            
-            # 修正其他常見的語法錯誤
-            (r'，由([^所]+)所騎乘([^之]+)之([^，。]+)，', r'，撞擊\1所騎乘之\2\3，'),
-            
-            # 修正句子結構不完整的問題
-            (r'致撞擊([^，。]+)，$', r'致撞擊\1。'),
-            
-            # 修正重複的介詞或連詞
-            (r'之之', r'之'),
-            (r'於於', r'於'),
-            (r'，，', r'，'),
-            
-            # 修正車輛描述的語法
-            (r'車後之機車道上，由', r'車輛，該車輛由'),
-            
-            # 修正不完整的句子結構
-            (r'由([^所]+)所騎乘([^，。]+)，$', r'由\1所騎乘之\2。'),
-        ]
-        
-        for pattern, replacement in grammar_fixes:
-            cleaned_text = re.sub(pattern, replacement, cleaned_text)
-        
-        # 清理多餘的空格和標點
-        cleaned_text = re.sub(r'\s+', ' ', cleaned_text).strip()
-        cleaned_text = re.sub(r'，。', '。', cleaned_text)
-        cleaned_text = re.sub(r'。。', '。', cleaned_text)
-        
-        return cleaned_text
-    
     def _remove_conclusion_phrases(self, text: str) -> str:
         """移除文本中的結論性文字和總計說明"""
         import re
@@ -1153,12 +929,12 @@ class HybridCoTGenerator:
         for line in lines:
             line = line.strip()
             
-            # 跳過包含結論性關鍵詞的行（但不要誤刪理由說明）
+            # 跳過包含結論性關鍵詞的行
             conclusion_keywords = [
-                '綜上所述', '總計新台幣', '合計新台幣', '法定利息', 
+                '綜上所述', '總計', '合計', '共計', '法定利息', 
                 '按週年利率', '按年息', '起訴狀繕本送達',
-                '清償日止', '自.*起至.*止', '年息5%', '總額為',
-                '此有相關收據可證', '有收據為證', '有統一發票可證',
+                '清償日止', '自.*起至.*止', '利息', '總額',
+                '此有相關收據可證', '有收據為證', '有統一發票可證', '可證',
                 '經查', '查明', '經審理'
             ]
             
@@ -1193,271 +969,6 @@ class HybridCoTGenerator:
         cleaned_text = re.sub(r'。+', '。', cleaned_text)
         
         return cleaned_text.strip()
-    
-    def _remove_defendant_damage_errors(self, text: str) -> str:
-        """移除關於被告損害的錯誤內容"""
-        import re
-        
-        # 分行處理
-        lines = text.split('\n')
-        cleaned_lines = []
-        skip_section = False
-        
-        for line in lines:
-            line_stripped = line.strip()
-            
-            # 檢查是否開始被告損害段落
-            if re.search(r'[（(][一二三四五六七八九十][）)].*被告.*損害', line_stripped):
-                print(f"🔍 檢測到被告損害錯誤段落，開始跳過：{line_stripped}")
-                skip_section = True
-                continue
-            
-            # 檢查是否開始新的正常段落（如下一個原告或其他段落）
-            if skip_section and (
-                re.search(r'^[一二三四五六七八九十]、', line_stripped) or  # 新的大標題
-                re.search(r'[（(][一二三四五六七八九十][）)](?!.*被告)', line_stripped) or  # 新的項目但不是被告
-                line_stripped.startswith('四、') or  # 結論段落
-                line_stripped == ''
-            ):
-                skip_section = False
-            
-            # 如果不在跳過模式中，保留這行
-            if not skip_section:
-                # 額外檢查：移除任何直接提到被告損害的行
-                if ('被告' in line_stripped and '損害' in line_stripped and 
-                    ('之損害' in line_stripped or '的損害' in line_stripped)):
-                    print(f"🔍 移除被告損害相關行：{line_stripped}")
-                    continue
-                
-                # 移除解釋被告為什麼沒有損害的無用文字
-                if ('未提及被告' in line_stripped or 
-                    '故此部分無損害項目' in line_stripped or
-                    '由於原始描述僅提供' in line_stripped):
-                    print(f"🔍 移除無用解釋文字：{line_stripped}")
-                    continue
-                
-                cleaned_lines.append(line)
-        
-        # 重新組合
-        cleaned_text = '\n'.join(cleaned_lines)
-        
-        # 清理多餘的空行
-        cleaned_text = re.sub(r'\n\s*\n\s*\n', '\n\n', cleaned_text)
-        
-        return cleaned_text.strip()
-    
-    def _final_format_validation(self, text: str, is_single_case: bool) -> str:
-        """最終格式驗證和修正"""
-        import re
-        
-        if not is_single_case:
-            return text  # 多原告案件不需要特殊處理
-        
-        # 單一原告案件的特殊格式修正
-        lines = text.split('\n')
-        corrected_lines = []
-        
-        for line in lines:
-            line_stripped = line.strip()
-            
-            # 檢測並修正「（一）原告之損害：」格式
-            if re.match(r'^[（(][一二三四五六七八九十][）)].*原告.*之損害：?$', line_stripped):
-                print(f"🔍 檢測到錯誤格式，移除：{line_stripped}")
-                continue  # 跳過這種錯誤格式的行
-            
-            # 檢測並修正嵌套的損害項目格式
-            # 如：「1. 醫療費用：182,690元」→「（一）醫療費用：182,690元」
-            if re.match(r'^\d+\.\s*([^：]+)：([0-9,]+元)', line_stripped):
-                match = re.match(r'^\d+\.\s*([^：]+)：([0-9,]+元)', line_stripped)
-                if match:
-                    item_name = match.group(1).strip()
-                    amount = match.group(2).strip()
-                    # 轉換為正確的中文編號格式
-                    # 簡單的數字轉換（1→一，2→二等）
-                    chinese_nums = ['', '一', '二', '三', '四', '五', '六', '七', '八', '九', '十']
-                    item_num = re.match(r'^(\d+)', line_stripped).group(1)
-                    try:
-                        num = int(item_num)
-                        if num <= 10:
-                            chinese_num = chinese_nums[num]
-                            corrected_line = f"（{chinese_num}）{item_name}：{amount}"
-                            print(f"🔍 格式修正：{line_stripped} → {corrected_line}")
-                            corrected_lines.append(corrected_line)
-                            continue
-                    except:
-                        pass
-            
-            corrected_lines.append(line)
-        
-        # 重新組合並清理
-        corrected_text = '\n'.join(corrected_lines)
-        
-        # 確保格式一致性
-        if not corrected_text.startswith("三、損害項目："):
-            corrected_text = "三、損害項目：\n" + corrected_text
-        
-        return corrected_text.strip()
-    
-    def _clean_evidence_language(self, text: str) -> str:
-        """清理文本中的證據語言"""
-        import re
-        
-        # 移除證據相關文字
-        evidence_patterns = [
-            r'，此有[^。]*可證。?',
-            r'，有[^。]*收據[^。]*證。?',
-            r'，有[^。]*發票[^。]*證。?',
-            r'，有[^。]*證明[^。]*證。?',
-            r'，[^。]*為證。?',
-            r'此有[^。]*可證。?',
-            r'有[^。]*收據[^。]*證。?',
-            r'有[^。]*發票[^。]*證。?',
-            r'有[^。]*證明[^。]*證。?',
-            r'[^。]*為證。?'
-        ]
-        
-        cleaned_text = text
-        for pattern in evidence_patterns:
-            cleaned_text = re.sub(pattern, '。', cleaned_text)
-        
-        # 清理多餘的句號和空格
-        cleaned_text = re.sub(r'。+', '。', cleaned_text)
-        cleaned_text = re.sub(r'\s+', ' ', cleaned_text)
-        cleaned_text = cleaned_text.strip().rstrip('。')
-        
-        return cleaned_text
-
-    def _ensure_reason_completeness(self, text: str, original_facts: str) -> str:
-        """確保每個損害項目都有理由說明"""
-        import re
-        
-        lines = text.split('\n')
-        enhanced_lines = []
-        
-        # 解析原始描述，建立項目到理由的對應
-        reason_map = {}
-        original_lines = original_facts.split('\n')
-        
-        current_item = None
-        current_reason = []
-        
-        for line in original_lines:
-            line = line.strip()
-            if not line:
-                continue
-            
-            # 檢查是否是新的項目開始
-            item_match = re.match(r'^\d+\.\s*([^：]+)：', line)
-            if item_match:
-                # 保存前一個項目的理由
-                if current_item and current_reason:
-                    reason_text = ' '.join(current_reason)
-                    # 清理證據語言
-                    reason_text = self._clean_evidence_language(reason_text)
-                    reason_map[current_item] = reason_text
-                
-                # 開始新項目
-                current_item = item_match.group(1).strip()
-                current_reason = []
-                
-                # 檢查同一行是否有理由
-                reason_part = line.split('：', 1)[1] if '：' in line else ''
-                if reason_part and not re.match(r'^\d+[,\d]*元', reason_part.strip()):
-                    current_reason.append(reason_part.strip())
-            else:
-                # 這是理由說明行
-                if current_item and line:
-                    current_reason.append(line)
-        
-        # 保存最後一個項目
-        if current_item and current_reason:
-            reason_text = ' '.join(current_reason)
-            # 清理證據語言
-            reason_text = self._clean_evidence_language(reason_text)
-            reason_map[current_item] = reason_text
-        
-        # 處理輸出文本，補充缺失的理由
-        i = 0
-        while i < len(lines):
-            line = lines[i].strip()
-            enhanced_lines.append(lines[i])
-            
-            # 檢查是否是損害項目行
-            item_match = re.match(r'^[（(][一二三四五六七八九十][）)]([^：]+)：([0-9,]+元)', line)
-            if item_match:
-                item_name = item_match.group(1).strip()
-                amount = item_match.group(2).strip()
-                
-                # 檢查下一行是否有理由
-                has_reason = False
-                if i + 1 < len(lines):
-                    next_line = lines[i + 1].strip()
-                    if (next_line and 
-                        not re.match(r'^[（(][一二三四五六七八九十][）)]', next_line) and
-                        len(next_line) > 10):
-                        has_reason = True
-                
-                # 如果沒有理由，從原始描述中找理由並添加
-                if not has_reason:
-                    reason = None
-                    
-                    # 精確匹配項目名稱
-                    for key, value in reason_map.items():
-                        if item_name in key or key in item_name:
-                            reason = value
-                            break
-                    
-                    # 如果找不到精確匹配，用簡潔的通用理由
-                    if not reason:
-                        if '醫療' in item_name:
-                            reason = f"原告因本次事故受傷，支出{item_name}{amount}。"
-                        elif '看護' in item_name:
-                            reason = f"原告因本次事故受有重傷，需專人看護，支出{item_name}{amount}。"
-                        elif '交通' in item_name:
-                            reason = f"原告因本次事故受傷就醫期間，支出{item_name}{amount}。"
-                        elif '工作' in item_name or '損失' in item_name:
-                            reason = f"原告因本次事故受傷無法工作，受有{item_name}{amount}。"
-                        elif '慰撫' in item_name:
-                            reason = f"原告因本次事故受有傷害，造成身心痛苦，請求{item_name}{amount}。"
-                        else:
-                            reason = f"原告因本次事故支出{item_name}{amount}。"
-                    
-                    if reason:
-                        # 添加理由行
-                        enhanced_lines.append(reason)
-                        print(f"🔍 補充理由：{item_name} -> {reason}")
-            
-            i += 1
-        
-        return '\n'.join(enhanced_lines)
-    
-    def _sort_laws_by_article_number(self, laws: List[str], law_descriptions: dict) -> List[tuple]:
-        """按條號數字大小排序法條並返回(條號, 內容)元組列表"""
-        import re
-        
-        def extract_article_number(law: str) -> tuple:
-            """提取條號數字用於排序"""
-            # 匹配如：民法第184條第1項前段
-            match = re.search(r'第(\d+)條(?:之(\d+))?', law)
-            if match:
-                main_num = int(match.group(1))
-                sub_num = int(match.group(2)) if match.group(2) else 0
-                return (main_num, sub_num)
-            return (999, 0)  # 無法解析的放到最後
-        
-        # 創建包含條號、內容和排序鍵的列表
-        law_items = []
-        for law in laws:
-            if law in law_descriptions:
-                content = f"「{law_descriptions[law]}」"
-                sort_key = extract_article_number(law)
-                law_items.append((law, content, sort_key))
-        
-        # 按條號數字排序
-        law_items.sort(key=lambda x: x[2])
-        
-        # 返回(條號, 內容)元組列表
-        return [(item[0], item[1]) for item in law_items]
     
     def _detect_structure_type(self, text: str) -> str:
         """檢測文本結構類型"""
@@ -1539,57 +1050,25 @@ class HybridCoTGenerator:
         """使用智能金額計算生成CoT結論（防止重複和錯誤計算）"""
         print("🧠 生成CoT結論（含總金額計算）...")
         
-        # 統一使用詳細損害項目提取方法（已驗證準確）
-        plaintiff_damages = self._extract_damage_items_from_text(compensation_text)
-        
-        # 基於詳細項目計算總金額（確保一致性）
-        total_amount = 0
-        amounts = []
-        item_details = []
-        
-        print("🔍 【統一金額計算】基於第三部分詳細項目計算總額...")
-        for plaintiff, damages in plaintiff_damages.items():
-            for damage in damages:
-                total_amount += damage['amount']
-                amounts.append(damage['amount'])
-                item_details.append(f"{damage['name']}{damage['amount']:,}元")
-                print(f"   ✅ {plaintiff}: {damage['name']} {damage['amount']:,}元")
-        
-        print(f"🔍 【統一金額計算】最終總計: {total_amount:,}元")
+        # 提取所有金額用於計算
+        amounts = self._extract_valid_claim_amounts(compensation_text)
+        total_amount = sum(amounts) if amounts else 0
         
         # 構建包含金額計算的CoT提示詞
         plaintiff = parties.get("原告", "原告")
         defendant = parties.get("被告", "被告")
-        plaintiff_count = parties.get('原告數量', 1)
-        
-        # 構建原告分組信息
-        plaintiff_details = ""
-        if plaintiff_damages:
-            plaintiff_details = "\n📋 各原告損害詳情："
-            for plaintiff_name, damages in plaintiff_damages.items():
-                plaintiff_details += f"\n• 原告{plaintiff_name}："
-                for damage in damages:
-                    plaintiff_details += f" {damage['name']}{damage['amount']:,}元"
-        
-        # 根據被告數量決定責任用詞
-        defendant_list = [name.strip() for name in parties.get('被告', '被告').split('、') if name.strip() and name.strip() != '被告']
-        defendant_count = len(defendant_list) if defendant_list else 1
-        
-        # 單一被告用「賠償」，多被告用「連帶賠償」
-        liability_term = "連帶賠償" if defendant_count > 1 else "賠償"
         
         prompt = f"""你是台灣資深律師，請運用Chain of Thought推理方式生成專業的起訴狀結論段落。
 
 👥 當事人資訊：
-原告：{plaintiff}（共{plaintiff_count}名）
-被告：{defendant}（共{defendant_count}名）
+原告：{plaintiff}
+被告：{defendant}
 
 📄 案件事實：
 {accident_facts}
 
 📄 損害賠償內容：
 {compensation_text}
-{plaintiff_details}
 
 💰 智能金額分析結果：
 提取到的有效求償金額：{amounts}
@@ -1598,24 +1077,17 @@ class HybridCoTGenerator:
 🧠 請使用Chain of Thought方式分析：
 
 步驟1: 分析案件性質和當事人責任
-步驟2: 從損害賠償內容中識別各原告的具體損害項目和金額
-步驟3: 確保姓名一致性（與事實概述中的姓名完全一致）
-步驟4: 按原告分組列出具體損害項目，形成精確的結論
+步驟2: 從損害賠償內容中識別各項損害項目
+步驟3: 驗證各項金額的合理性（使用智能分析結果）
+步驟4: 形成簡潔精確的結論
 
 🏛️ 最後請生成專業的結論段落，格式要求：
 - 開頭：「四、結論：」
 - 格式：一段式連續文字，不要條列式
-- 內容結構：「綜上所陳，被告應{liability_term}原告之損害，包含原告[姓名1][項目1][金額1]元、[項目2][金額2]元；原告[姓名2][項目1][金額1]元、[項目2][金額2]元，總計{total_amount:,}元，並自起訴狀副本送達翌日起至清償日止，按年息5%計算之利息。」
-
-⚠️ 重要要求：
-1. 必須按原告分組，清楚列出每位原告的具體損害項目和金額
-2. 確保原告姓名與事實概述完全一致
-3. 每位原告的損害項目要準確對應其實際金額
-4. 必須使用提供的正確總計{total_amount:,}元
-5. 用一段連續文字，不要分條列出
-6. 如有多名原告，用分號區隔不同原告的損害項目
-7. **重要**：項目名稱必須與損害賠償段落完全一致（如：損害段落寫「工作損失」，結論就用「工作損失」，不可改為「工資損失」）
-8. **重要**：車輛相關項目使用統一名稱（如：「車輛損失」而非「車輛貶值損失」或「鑑定費用」）
+- 內容：「綜上所陳，被告應賠償原告之損害，包含[項目1][金額1]元、[項目2][金額2]元...等，總計{total_amount:,}元，並自起訴狀副本送達翌日起至清償日止，按年息5%計算之利息。」
+- ⚠️ 重要：避免重複說明同一項目，每項損害只說明一次
+- ⚠️ 重要：必須使用提供的正確總計{total_amount:,}元
+- ⚠️ 重要：請用一段連續文字，不要分條列出
 
 請直接輸出結論段落："""
 
@@ -1631,6 +1103,260 @@ class HybridCoTGenerator:
         return self.generate_cot_conclusion_with_smart_amount_calculation(
             accident_facts, compensation_text, parties
         )
+    
+    def generate_dual_round_cot_lawsuit(self, accident_facts: str, compensation_text: str, parties: dict, similar_cases: list = None) -> str:
+        """雙輪CoT起訴狀生成：輪1生成，輪2檢查驗證"""
+        print("🔄 啟動雙輪CoT起訴狀生成系統...")
+        
+        # 輪1：生成起訴狀
+        print("📝 輪1：生成起訴狀...")
+        round1_result = self._round1_generate_lawsuit(accident_facts, compensation_text, parties, similar_cases)
+        
+        # 輪2：檢查驗證
+        print("🔍 輪2：檢查驗證...")
+        round2_result = self._round2_verify_lawsuit(round1_result, accident_facts, compensation_text, parties)
+        
+        return round2_result
+    
+    def _round1_generate_lawsuit(self, accident_facts: str, compensation_text: str, parties: dict, similar_cases: list = None) -> str:
+        """輪1：生成起訴狀 Prompt"""
+        plaintiff = parties.get("原告", "原告")
+        defendant = parties.get("被告", "被告")
+        
+        # 分析當事人狀況以確定法條引用
+        case_analysis = self._analyze_case_for_laws(parties, accident_facts, compensation_text)
+        
+        prompt = f"""你是一名法律文書生成助手，負責撰寫交通事故民事賠償案件的四段式起訴狀。
+請嚴格遵守以下規則：
+
+👥 當事人資訊：
+原告：{plaintiff}
+被告：{defendant}
+
+📄 案件事實：
+{accident_facts}
+
+📄 損害賠償內容：
+{compensation_text}
+
+一、段落結構：
+1. 一、事實：僅描述事故經過，不帶入傷勢或金額
+2. 二、法律依據：引用適用條文並說明構成要件
+3. 三、損害項目：詳列各項損害及金額
+4. 四、結論：綜合請求賠償總額
+
+二、法條引用條件（判斷→引用）：
+
+權利受損 → 民法184條1項前段
+
+交通工具加害 → 民法191條之2
+
+精神慰撫金/非財產損害 → 民法195條1項前段
+
+工作損失/薪資損失/看護費用 → 民法193條1項
+
+被告為未成年人且有法定代理人成為被告 → 必須引用民法187條1項，且不得引用185條
+
+僱用關係（受僱人+雇主） → 必須引用民法188條1項本文，且不得引用185條
+
+僅當未符合187或188，且存在多名被告 → 引用185條1項
+
+動物造成損害 → 民法190條1項
+
+三、格式：
+條文引用格式為「文字先引用，再列條號」。
+
+🔍 案件分析結果：
+{case_analysis}
+
+請嚴格按照上述規則生成完整的四段式起訴狀："""
+
+        result = self.call_llm(prompt, timeout=240)
+        return result if result else "（輪1生成失敗）"
+    
+    def _round2_verify_lawsuit(self, generated_lawsuit: str, accident_facts: str, compensation_text: str, parties: dict) -> str:
+        """輪2：檢查驗證 Prompt"""
+        
+        verification_prompt = f"""你現在是一名檢查員，負責驗證上一步生成的起訴狀是否符合要求。請逐條回答，若不合格指出問題並給出修正方案。
+
+📄 待檢查的起訴狀：
+{generated_lawsuit}
+
+📄 原始資料：
+當事人：{parties}
+事故事實：{accident_facts}
+損害內容：{compensation_text}
+
+檢查清單：
+
+1. 事實段是否僅描述事故經過，未帶入傷勢或金額？
+
+2. 法律依據段是否引用所有應用條文？（依上述判斷條件檢查184/191-2/193/195/185/188/187/190）
+
+3. 185 / 187 / 188 條是否遵循優先規則？
+   - 若有未成年被告+法定代理人 → 必須引用187，且不得引用185
+   - 若有僱用關係 → 必須引用188，且不得引用185
+   - 僅當無187/188且有多被告 → 引用185
+   - 不得同時引用185與187 / 188，並必須說明選擇理由
+
+4. 條文引用格式是否正確（文字先引用，再列條號）？
+
+5. 損害項目段是否涵蓋輸入中所有金額？模糊描述（如「非財產損害」「仰賴他人照護」）是否正確歸類為精神慰撫金或看護費？
+
+6. 損害項目段是否每項金額都有合理請求理由？總額是否與各項加總一致？
+
+7. 文書是否包含四段且格式完整？
+
+請逐項檢查並回答「通過」或「不通過」，若不通過請說明問題。
+若任何一項為否，請重寫整篇起訴狀並修正，直到全部通過。
+
+檢查結果："""
+
+        verification_result = self.call_llm(verification_prompt, timeout=240)
+        
+        # 如果檢查發現問題，進行修正
+        if "不通過" in verification_result or "重寫" in verification_result:
+            print("⚠️ 檢查發現問題，進行修正...")
+            correction_prompt = f"""基於以下檢查結果，請重寫完整的起訴狀：
+
+檢查結果：
+{verification_result}
+
+原始起訴狀：
+{generated_lawsuit}
+
+請根據檢查意見完全重寫起訴狀，確保：
+1. 修正所有指出的問題
+2. 保持四段式結構完整
+3. 法條引用完全正確
+4. 金額計算準確無誤
+
+重寫的起訴狀："""
+            
+            corrected_result = self.call_llm(correction_prompt, timeout=240)
+            return corrected_result if corrected_result else generated_lawsuit
+        
+        return generated_lawsuit
+    
+    def _analyze_case_for_laws(self, parties: dict, accident_facts: str, compensation_text: str) -> str:
+        """分析案件以確定適用法條"""
+        analysis = []
+        
+        # 分析當事人狀況
+        defendant_info = parties.get("被告", "")
+        plaintiff_info = parties.get("原告", "")
+        
+        # 檢查未成年+法定代理人
+        if "未成年" in defendant_info and "法定代理人" in defendant_info:
+            analysis.append("✓ 被告含未成年人及法定代理人 → 應引用民法187條1項，不得引用185條")
+        
+        # 檢查僱用關係
+        if "受僱" in defendant_info or "雇主" in defendant_info or "公司" in defendant_info:
+            analysis.append("✓ 存在僱用關係 → 應引用民法188條1項，不得引用185條")
+        
+        # 檢查多被告
+        defendant_count = parties.get("被告數量", 1)
+        if defendant_count > 1:
+            analysis.append("✓ 多名被告 → 可能適用民法185條1項（需確認無187/188條適用）")
+        
+        # 檢查損害類型
+        if "精神" in compensation_text or "慰撫金" in compensation_text:
+            analysis.append("✓ 有精神慰撫金請求 → 應引用民法195條1項前段")
+        
+        if "薪資" in compensation_text or "工作" in compensation_text or "看護" in compensation_text:
+            analysis.append("✓ 有工作損失或看護費用 → 應引用民法193條1項")
+        
+        if "車禍" in accident_facts or "交通" in accident_facts:
+            analysis.append("✓ 交通事故案件 → 應引用民法191條之2、184條1項前段")
+        
+        return "\n".join(analysis) if analysis else "無特殊法條適用狀況"
+    
+    def generate_complete_dual_round_cot(self, accident_facts: str, compensation_text: str, parties: dict, similar_cases: list = None, case_ids: list = None) -> dict:
+        """完整的雙輪CoT起訴狀生成（包含檢索、統計、生成、驗證）"""
+        
+        # 生成事實段落
+        print("📝 生成事實段落...")
+        facts = self.generate_standard_facts(accident_facts, similar_cases)
+        print("✅ 事實段落生成完成")
+        
+        # 統計相似案例法條並生成法律依據
+        print("⚖️ 生成法律依據...")
+        if similar_cases and case_ids:
+            try:
+                print("📊 分析相似案例使用的法條...")
+                similar_laws_stats = get_similar_cases_laws_stats(case_ids)
+                if similar_laws_stats:
+                    print("📋 相似案例常用法條統計:")
+                    for law_name, count in similar_laws_stats[:5]:
+                        print(f"   • {law_name}: {count}次")
+                    print()
+            except Exception as e:
+                print(f"⚠️ 法條統計分析失敗: {e}")
+        
+        laws = self.generate_standard_laws(
+            accident_facts,
+            "",  # injuries 留空
+            parties,
+            compensation_text
+        )
+        print("✅ 法律依據生成完成")
+        
+        # 生成損害賠償
+        print("💰 生成損害賠償...")
+        damages = self.generate_smart_compensation(
+            "",  # injuries 留空
+            compensation_text, 
+            parties
+        )
+        print("✅ 損害賠償生成完成")
+        
+        # 使用雙輪CoT生成結論
+        print("🧠 雙輪CoT結論生成...")
+        conclusion = self._round1_generate_lawsuit(accident_facts, compensation_text, parties, similar_cases)
+        verified_conclusion = self._round2_verify_lawsuit(conclusion, accident_facts, compensation_text, parties)
+        print("✅ 雙輪CoT結論生成完成")
+        
+        print("\n✅ 所有生成步驟完成！")
+        
+        # 提取適用法條
+        applicable_laws = determine_applicable_laws(
+            accident_facts,
+            "",  # injuries
+            compensation_text,
+            parties
+        )
+        
+        # 組合完整起訴狀
+        # Debug: Check variable types before concatenation
+        if not isinstance(facts, str):
+            print(f"❌ facts is not string, type: {type(facts)}, value: {facts}")
+            facts = str(facts)
+        if not isinstance(laws, str):
+            print(f"❌ laws is not string, type: {type(laws)}, value: {laws}")
+            laws = str(laws)
+        if not isinstance(damages, str):
+            print(f"❌ damages is not string, type: {type(damages)}, value: {damages}")
+            damages = str(damages)
+        if not isinstance(verified_conclusion, str):
+            print(f"❌ verified_conclusion is not string, type: {type(verified_conclusion)}, value: {verified_conclusion}")
+            verified_conclusion = str(verified_conclusion)
+            
+        full_lawsuit = f"""{facts}
+
+{laws}
+
+{damages}
+
+{verified_conclusion}"""
+        
+        return {
+            "lawsuit": full_lawsuit,
+            "applicable_laws": applicable_laws,
+            "facts": facts,
+            "laws": laws,
+            "damages": damages,
+            "conclusion": verified_conclusion
+        }
     
     def _build_structured_cot_prompt(self, accident_facts: str, compensation_text: str, parties: dict, analysis_result: dict) -> str:
         """構建基於結構化分析的CoT提示詞"""
@@ -1833,87 +1559,77 @@ class HybridCoTGenerator:
         return verification
 
     def _generate_llm_based_compensation(self, comp_facts: str, parties: dict) -> str:
-        """使用LLM完全處理損害項目生成 - 支持格式自適應"""
+        """使用LLM完全處理損害項目生成"""
         
         # 先預處理中文數字
         preprocessed_facts = self._preprocess_chinese_numbers(comp_facts)
         
-        # 檢測輸入格式類型
-        if self.format_handler:
-            format_info = self.format_handler.detect_format(preprocessed_facts)
-            detected_format = format_info.get('primary_format')
-            confidence = format_info.get('confidence', 0.0)
-            print(f"🔍 【格式檢測】檢測到格式: {detected_format} (置信度: {confidence:.2f})")
-        else:
-            detected_format = None
-            confidence = 0.0
+        # 檢查是否為單一原告和被告情況
+        plaintiff_count = parties.get('原告數量', 1)
+        defendant_count = parties.get('被告數量', 1)
+        is_single_case = plaintiff_count == 1 and defendant_count == 1
         
-        # 檢查是否為單一原告情況（被告數量不影響格式選擇）
-        # 正確計算當事人數量
-        plaintiff_list = [name.strip() for name in parties.get('原告', '原告').split('、') if name.strip() and name.strip() != '原告']
-        defendant_list = [name.strip() for name in parties.get('被告', '被告').split('、') if name.strip() and name.strip() != '被告']
-        
-        # 如果沒有具體姓名，當事人數量為1
-        plaintiff_count = len(plaintiff_list) if plaintiff_list else 1
-        defendant_count = len(defendant_list) if defendant_list else 1
-        is_single_case = plaintiff_count == 1  # 只看原告數量
-        
-        # 除錯輸出
-        print(f"🔍 DEBUG: parties = {parties}")
-        print(f"🔍 DEBUG: plaintiff_list = {plaintiff_list}")
-        print(f"🔍 DEBUG: plaintiff_count = {plaintiff_count}, defendant_count = {defendant_count}")
-        print(f"🔍 DEBUG: is_single_case = {is_single_case}")
-        
-        # 根據格式檢測結果選擇合適的提示詞策略
-        # 優先檢查是否為多原告案例
-        if plaintiff_count > 1:
-            # 多原告案例 - 強制使用多原告專門處理
-            print(f"🔍 檢測到多原告案例: {plaintiff_count}名原告，使用多原告專門處理")
-            prompt = self._build_adaptive_prompt(preprocessed_facts, parties, 'multi_plaintiff_narrative')
-        elif detected_format == 'multi_plaintiff_narrative' or (format_info.get('is_multi_plaintiff', False) and plaintiff_count > 1):
-            # 多原告案例 - 使用多原告專門處理
-            prompt = self._build_adaptive_prompt(preprocessed_facts, parties, 'multi_plaintiff_narrative')
-        elif detected_format == 'free_format' or confidence < 0.5:
-            # 自由格式或格式不明確 - 使用適應性提示詞
-            prompt = self._build_adaptive_prompt(preprocessed_facts, parties, detected_format)
-        elif is_single_case:
-            # 單一原告時，使用簡化的中文編號格式（不論被告數量）
-            prompt = f"""請將以下損害內容整理成損害項目清單，理由簡潔明瞭。
-
-【原始內容】
-{preprocessed_facts}
-
-【輸出格式】
-（一）項目名稱：金額元
-原告因本次事故[簡潔理由]，支出/受有[項目名稱][金額]元。
-
-【範例】
-（一）醫療費用：182,690元
-原告因本次事故受傷，於南門醫院、雲林基督教醫院就醫治療，支出醫療費用共計182,690元。
-
-（二）看護費用：246,000元
-原告因本次事故受有重傷，需專人看護，支出看護費用246,000元。
-
-（三）工作損失：485,000元
-原告於車禍發生時任職於凱撒大飯店房務部領班，因本次事故受傷需休養一年，致無法工作，受有工作損失485,000元。
-
-【要求】
-- 理由1-2句話，簡潔明瞭
-- 保留重要醫院名稱、工作單位等關鍵資訊
-- 統一使用"本次事故"而非"本件車禍"
-- 工作損失項目名稱直接用"工作損失"
-- 精神慰撫金項目名稱直接用"慰撫金"
-- 不要過度解釋或分析
-
-請輸出："""
-        else:
-            # 多原告時，使用完整格式，每位原告分別列出損害
+        if is_single_case:
+            # 單一原被告時，使用中文編號格式
             prompt = f"""你是台灣律師，請根據車禍案件的損害賠償內容，分析並重新整理成標準的起訴狀損害項目格式：
 
 【當事人資訊】
-原告：{parties.get('原告', '未提及')}（共{plaintiff_count}名）
-被告：{parties.get('被告', '未提及')}（共{defendant_count}名）
-原告名單：{plaintiff_list}
+原告：{parties.get('原告', '原告')}（單一原告）
+被告：{parties.get('被告', '被告')}（單一被告）
+
+【原始損害描述】
+{preprocessed_facts}
+
+【分析要求】
+請仔細分析上述內容，從中提取出：
+1. 具體的損害項目類型和確切金額
+2. 每項損害的事實根據和法律理由
+3. **重要**：只能使用原始描述中已提及的事實，絕對不可以自行添加或編造任何內容
+
+【標準輸出格式】
+三、損害項目：
+
+（一）醫療復健費用：190元
+原告因本次事故受有左膝挫傷、半月軟骨受傷等傷害，為治療上開傷勢而就醫，支出醫療復健費用190元。
+
+（二）車輛修復費用：181,144元
+原告因本次事故導致所駕駛之車輛受損，修復費用包括工資費用88,774元和零件費用92,370元，共計181,144元。
+
+（三）交通費用：4,500元
+原告因傷不良於行，上下班須搭乘計程車，支出交通費用4,500元。
+
+（四）休養期間工作收入損失：33,000元
+原告因本次車禍受傷，依醫囑需休養1個月，無法工作，造成工作收入損失33,000元。
+
+（五）慰撫金：99,000元
+原告因本次車禍造成身體傷害，不僅造成身體上的痛苦，更因傷勢影響日常生活及工作，承受巨大精神壓力，爰向被告請求慰撫金99,000元。
+
+【關鍵要求】
+- 使用（一）（二）（三）等中文編號
+- 每項格式：（編號）項目名稱：金額 + 詳細法律理由說明
+- 理由說明必須基於原始描述中的具體事實
+- 不可自行編造任何醫療診斷、傷勢描述或其他細節
+- 如果原始描述中沒有具體傷勢，就用一般性描述如「受有傷害」
+- 理由要採用正式的法律文書語言
+- 使用千分位逗號格式顯示金額
+
+【嚴格禁止事項】
+- 絕對不可在輸出中包含「綜上所述」、「總計」、「合計」、「共計」等結論性文字
+- 不要包含任何總金額計算或匯總說明
+- 不要包含任何法定利息的說明
+- 不要包含任何結論段落或總結文字
+- 不要包含證據相關文字：「此有相關收據可證」、「有收據為證」、「有統一發票可證」、「可證」等
+- 不要包含判決書用語：「經查」、「查明」、「經審理」等
+- 只輸出純粹的損害項目條列，每項包含編號、名稱、金額、理由說明
+
+請嚴格按照上述格式和要求，基於原始描述的事實分析並輸出損害項目："""
+        else:
+            # 多原告或多被告時，使用完整格式，但每位原告內部使用中文編號
+            prompt = f"""你是台灣律師，請根據車禍案件的損害賠償內容，分析並重新整理成標準的起訴狀損害項目格式：
+
+【當事人資訊】
+原告：{parties.get('原告', '未提及')}（共{parties.get('原告數量', 1)}名）
+被告：{parties.get('被告', '未提及')}（共{parties.get('被告數量', 1)}名）
 
 【原始損害描述】
 {preprocessed_facts}
@@ -1921,20 +1637,15 @@ class HybridCoTGenerator:
 【分析要求】
 請仔細分析上述內容，從中提取出：
 1. 每位原告的具體損害項目類型和確切金額
-2. **每項損害的詳細事實根據和法律理由**：這是最重要的部分！
+2. 每項損害的事實根據和法律理由
 3. **重要**：只能使用原始描述中已提及的事實，絕對不可以自行添加或編造任何內容
-4. **就醫紀錄整合**：如果原始描述中有具體的醫院名稱，請將這些就醫紀錄整合到醫療相關損害項目的理由說明中
-5. **理由完整性**：每個損害項目都必須有完整的理由說明，包括：
-   - 損害發生的原因（因本次車禍...）
-   - 具體的事實依據（支出費用、受傷情況、影響等）
-   - 相關的詳細說明（就醫情況、工作影響、生活影響等）
 
 【標準輸出格式】
 三、損害項目：
 
 （一）原告吳麗娟之損害：
 1. 醫療費用：6,720元
-原告吳麗娟因本次車禍受傷，於臺北榮民總醫院、馬偕紀念醫院、內湖菁英診所及中醫診所就醫治療，支出醫療費用計6,720元。
+原告吳麗娟因本次車禍支出臺北榮民總醫院1,490元、馬偕紀念醫院1,580元、內湖菁英診所6,000元及中醫1,750元等醫療費用。
 
 2. 未來手術費用：264,379元
 原告吳麗娟因本次車禍經榮民總醫院確診發生腰椎第一、二節脊椎滑脫，預計未來手術費用為264,379元。
@@ -1947,7 +1658,7 @@ class HybridCoTGenerator:
 
 （二）原告陳碧翔之損害：
 1. 醫療費用：12,180元
-原告陳碧翔因本次車禍受傷，於臺北榮民總醫院、馬偕紀念醫院及中醫診所就醫治療，支出醫療費用計12,180元。
+原告陳碧翔因本次車禍支出臺北榮民總醫院6,080元、馬偕紀念醫院1,500元及中醫費用5,600元等醫療費用。
 
 2. 假牙裝置費用：24,000元
 原告陳碧翔因本次車禍頭部右側遭受重擊，假牙脫落，需重新安裝假牙裝置，費用為24,000元。
@@ -1955,15 +1666,9 @@ class HybridCoTGenerator:
 【關鍵要求】
 - 每位原告先用（一）（二）等編號區分
 - 每位原告內部的損害項目使用 1. 2. 3. 等數字編號
-- **每項必須格式**：數字編號. 項目名稱：金額 + 詳細完整的法律理由說明
-- **理由完整性要求**：每個損害項目都必須包含完整的理由說明，不可只有金額
-- **理由內容要求**：
-  - 損害發生的原因（如：因本次車禍受傷...）
-  - 具體的事實依據（如：支出費用、受傷情況、工作影響等）
-  - 相關的詳細說明（如：就醫情況、治療需要、生活影響等）
-- 理由說明必須基於原始描述中的具體事實，充分提取原始描述的詳細資訊
+- 每項格式：數字編號. 項目名稱：金額 + 詳細法律理由說明
+- 理由說明必須嚴格基於原始描述中的具體事實
 - 不可自行編造任何醫療診斷、傷勢描述或其他細節
-- **就醫紀錄處理**：如果原始描述提及具體醫院名稱，請在醫療相關項目中加入「於[醫院名稱]就醫治療」
 - 理由要採用正式的法律文書語言
 - 使用千分位逗號格式顯示金額
 
@@ -1974,199 +1679,25 @@ class HybridCoTGenerator:
 - 不要包含任何結論段落或總結文字
 - 不要包含證據相關文字：「此有相關收據可證」、「有收據為證」、「有統一發票可證」、「可證」等
 - 不要包含判決書用語：「經查」、「查明」、「經審理」等
-- **絕對禁止被告損害**：不可以包含任何關於被告損害的內容，被告是賠償義務人不會有損害
-- **絕對禁止**：不可以出現「（二）被告...之損害」或任何被告損害的描述
 - 只輸出純粹的損害項目條列，每項包含編號、名稱、金額、理由說明
-- **明確原則**：起訴狀中只能有原告的損害，絕對不能創造虛假的被告損害項目
 
 請嚴格按照上述格式和要求，基於原始描述的事實分析並輸出損害項目："""
 
         result = self.call_llm(prompt, timeout=120)
         
         # 清理結論性文字
+        
         result = self._remove_conclusion_phrases(result)
-        
-        # 移除任何關於被告損害的錯誤內容
-        result = self._remove_defendant_damage_errors(result)
-        
-        # 檢查並補充缺失的理由
-        result = self._ensure_reason_completeness(result, preprocessed_facts)
-        
-        # 最終清理證據語言（但保留理由說明）
-        result = self._remove_conclusion_phrases(result)
-        
-        # 最終格式驗證和修正（但不要破壞理由）
-        # result = self._final_format_validation(result, is_single_case)
         
         # 檢查結果是否包含預期格式
-        if "（一）" in result:
-            # 確保包含標題「三、損害項目：」
+        if "（一）" in result and "原告" in result:
+            # 清理結果，確保格式正確
             if not result.startswith("三、損害項目："):
-                result = "三、損害項目：\n\n" + result
+                result = "三、損害項目：\n" + result
             return result
         else:
-            # Fallback：返回基本格式
-            return comp_facts
-
-    def _build_adaptive_prompt(self, preprocessed_facts: str, parties: dict, detected_format: str) -> str:
-        """根據檢測到的格式構建適應性提示詞"""
-        plaintiff = parties.get("原告", "原告")
-        plaintiff_count = parties.get('原告數量', 1)
-        
-        if detected_format == 'multi_plaintiff_narrative':
-            # 修正原告數量計算
-            plaintiff_list = [name.strip() for name in parties.get('原告', '原告').split('、') if name.strip() and name.strip() != '原告']
-            actual_plaintiff_count = len(plaintiff_list) if plaintiff_list else 1
-            
-            # 多原告敘述格式 - 專門處理多名原告各自的損害
-            return f"""你是台灣資深律師，請從以下多原告損害描述中分別提取每位原告的損害項目。
-
-【多原告損害描述】
-{preprocessed_facts}
-
-【當事人信息】
-原告：{plaintiff}（共{actual_plaintiff_count}名）
-原告名單：{plaintiff_list}
-
-【重要分析指導】
-這是多原告案例，需要：
-1. 分別識別每位原告的損害項目和金額
-2. 區分計算基準vs最終求償金額
-3. 按原告分組整理損害項目
-
-【輸出格式】
-（一）原告[姓名]之損害：
-1. 損害類型：金額元
-原告[姓名]因本次事故[簡潔理由]，支出/受有[損害類型]金額元。
-
-（二）原告[姓名]之損害：
-1. 損害類型：金額元
-原告[姓名]因本次事故[簡潔理由]，支出/受有[損害類型]金額元。
-
-【範例】
-（一）原告羅靖崴之損害：
-1. 醫療費用：2,443元
-原告羅靖崴因本次事故受傷就醫，支出醫療費用2,443元。
-2. 交通費：1,235元
-原告羅靖崴因本次事故就醫，支出交通費用1,235元。
-3. 工作損失：20,148元
-原告羅靖崴因本次事故無法工作16日，受有工作損失20,148元。
-4. 慰撫金：10,000元
-原告羅靖崴因本次事故受有身心痛苦，請求精神慰撫金10,000元。
-
-（二）原告邱品妍之損害：
-1. 醫療費用：57,550元
-原告邱品妍因本次事故受傷就醫，支出醫療費用57,550元。
-2. 交通費：22,195元
-原告邱品妍因本次事故就醫，支出交通費用22,195元。
-3. 工作損失：66,768元
-原告邱品妍因本次事故無法工作1月28日，受有工作損失66,768元。
-4. 車輛損失：36,000元
-原告邱品妍因本次事故車輛受損，支出修復及鑑定費用36,000元。
-5. 慰撫金：60,000元
-原告邱品妍因本次事故受有身心痛苦，請求精神慰撫金60,000元。
-
-【嚴格要求】
-- 必須按原告分組，每位原告單獨列出
-- 每位原告先用（一）（二）等中文編號區分
-- 每位原告內部用1. 2. 3.等數字編號
-- 只提取最終求償金額，排除計算基準（如月薪、日薪等）
-- 每項理由1-2句話，簡潔明瞭
-- 使用千分位逗號格式
-- 不要包含總計、綜上所述等結論性文字
-
-請分析並輸出："""
-            
-        elif detected_format == 'free_format':
-            # 自由文本格式 - 專門處理非結構化描述
-            return f"""你是台灣資深律師，請從以下自由文本中提取並整理損害賠償項目。
-
-【原始自由文本】
-{preprocessed_facts}
-
-【重要分析指導】
-以下文本可能包含：
-1. 混合描述的損害項目和金額
-2. 計算過程中的基準數據（如基本工資、日薪等）- 這些不是最終求償金額
-3. 最終的求償金額
-
-【提取原則】
-1. 識別真正的損害類型：醫療費用、交通費、看護費、工作損失、精神慰撫金等
-2. 區分計算基準vs最終求償：
-   - 計算基準：「以每日XX元作為計算基準」、「每月基本工資XX元計算」
-   - 最終求償：「共請求XX元」、「賠償XX元」、「損失為XX元」
-3. 只採用最終求償金額，排除計算過程中的基準數據
-
-【輸出格式】
-（一）損害類型：金額元
-原告因本次事故[簡潔理由說明]。
-
-【範例】
-（一）醫療費用：255,830元
-原告因本次事故受傷就醫，支出醫療及交通費用共計255,830元。
-
-（二）看護費用：270,000元
-原告因本次事故需專人照顧，支出看護費用共計270,000元。
-
-（三）工作損失：113,625元
-原告因本次事故無法工作，受有薪資損失共計113,625元。
-
-（四）慰撫金：300,000元
-原告因本次事故受有身心痛苦，請求精神慰撫金300,000元。
-
-【嚴格要求】
-- 只輸出真正的求償項目，排除計算基準
-- 每項理由1-2句話，簡潔明瞭
-- 使用千分位逗號格式
-- 不要包含總計、綜上所述等結論性文字
-
-請分析並輸出："""
-            
-        else:
-            # 其他格式或未知格式 - 使用通用策略
-            if plaintiff_count == 1:
-                return f"""請將以下損害內容整理成標準格式的損害項目清單。
-
-【原始內容】
-{preprocessed_facts}
-
-【輸出格式】
-（一）項目名稱：金額元
-原告因本次事故[簡潔理由]，支出/受有[項目名稱]金額元。
-
-【要求】
-- 每項理由1-2句話，簡潔明瞭
-- 保留重要醫院名稱、工作單位等關鍵資訊  
-- 統一使用"本次事故"
-- 工作損失項目名稱直接用"工作損失"
-- 精神慰撫金項目名稱直接用"慰撫金"
-- 使用千分位逗號格式顯示金額
-
-請輸出："""
-            else:
-                # 多原告情況
-                return f"""你是台灣律師，請根據車禍案件的損害賠償內容，分析並重新整理成標準的起訴狀損害項目格式：
-
-【當事人資訊】
-原告：{parties.get('原告', '未提及')}（共{plaintiff_count}名）
-被告：{parties.get('被告', '未提及')}（共{parties.get('被告數量', 1)}名）
-
-【原始損害描述】
-{preprocessed_facts}
-
-【標準輸出格式】
-（一）原告[姓名]之損害：
-1. 醫療費用：金額元
-原告[姓名]因本次車禍受傷，[詳細就醫情況]，支出醫療費用計金額元。
-
-【要求】
-- 每位原告先用（一）（二）等編號區分
-- 每位原告內部的損害項目使用 1. 2. 3. 等數字編號
-- 每項必須包含：數字編號. 項目名稱：金額 + 詳細理由說明
-- 理由要完整，包含損害原因、事實依據、詳細說明
-- 不可包含總計、綜上所述等結論性文字
-
-請分析並輸出："""
+            # Fallback：基本格式化
+            return f"三、損害項目：\n{comp_facts}"
 
     def _comprehensive_number_preprocessing(self, text: str) -> str:
         """全面預處理中文數字和特殊格式"""
@@ -2213,117 +1744,10 @@ class HybridCoTGenerator:
         return type1 is not None and type1 == type2
 
     def _extract_valid_claim_amounts(self, text: str) -> list:
-        """通用智能金額提取 - 使用多層次策略適應各種格式"""
-        print(f"🔍 【通用金額提取】原始文本: {text[:200]}...")
-
-        # 策略1: 使用通用格式處理器（如果可用）
-        if self.format_handler:
-            try:
-                damage_items = self.format_handler.extract_damage_items(text)
-                if damage_items and len(damage_items) >= 1:  # 修正：只要有1個結果就使用
-                    amounts = [item.amount for item in damage_items]
-                    
-                    # 後處理：移除明顯的計算基準金額 - 增強版
-                    filtered_amounts = []
-                    for amount in amounts:
-                        is_calculation_base = False
-                        
-                        # 檢查常見的計算基準金額 - 增強版
-                        calculation_base_checks = [
-                            # 月薪基準檢查
-                            {
-                                'patterns': ['每個月月薪', '月薪', '平均每月薪資', '每月工資.*為', '月工資.*為'],
-                                'description': '月薪基準'
-                            },
-                            # 每日費用基準檢查  
-                            {
-                                'patterns': ['每日', '日薪', '全日照護費用每日', '以.*每日.*計算', '以.*每日.*作為計算基準'],
-                                'description': '每日費用基準'
-                            },
-                            # 每月計算基準檢查
-                            {
-                                'patterns': ['每月.*計算', '依每月.*計算', '每月.*勞動能力', '依每月.*減少'],
-                                'description': '每月計算基準'
-                            },
-                            # 百分比計算基準檢查
-                            {
-                                'patterns': ['計算式', '×', '％', '76％計算', '.*％.*計算'],
-                                'description': '計算式基準'
-                            },
-                            # 特定金額基準檢查（針對實際案例）
-                            {
-                                'patterns': ['作為計算基準', '計算基準', '以.*計算', '按.*計算'],
-                                'description': '計算基準金額'
-                            },
-                            # 勞動能力減少基準
-                            {
-                                'patterns': ['勞動能力.*減少', '勞動能力.*損失.*計算', '勞動能力.*評估'],
-                                'description': '勞動能力評估基準'
-                            }
-                        ]
-                        
-                        # 檢查金額是否出現在計算基準的上下文中
-                        amount_str_patterns = [f'{amount:,}元', f'{amount}元']
-                        
-                        for pattern in amount_str_patterns:
-                            if pattern in text:
-                                pos = text.find(pattern)
-                                # 擴大上下文檢查範圍到120字符
-                                context_start = max(0, pos - 120)
-                                context_end = min(len(text), pos + 120)
-                                context = text[context_start:context_end]
-                                
-                                # 檢查所有類型的計算基準
-                                for check in calculation_base_checks:
-                                    for check_pattern in check['patterns']:
-                                        # 使用正則表達式進行更精確的匹配
-                                        import re as regex_module
-                                        if regex_module.search(check_pattern, context):
-                                            # 進一步驗證：確保基準詞和金額距離不超過30字符
-                                            pattern_pos = context.find(check_pattern) if check_pattern in context else -1
-                                            amount_pos_in_context = context.find(pattern)
-                                            
-                                            if pattern_pos != -1 and amount_pos_in_context != -1:
-                                                distance = abs(pattern_pos - amount_pos_in_context)
-                                                if distance < 30:  # 距離小於30字符
-                                                    # 檢查中間是否有排除詞
-                                                    start_pos = min(pattern_pos, amount_pos_in_context)
-                                                    end_pos = max(pattern_pos, amount_pos_in_context)
-                                                    between_text = context[start_pos:end_pos]
-                                                    
-                                                    # 如果中間包含明確的求償詞，則不視為計算基準
-                                                    claim_words = ['請求', '賠償', '損害', '損失', '支出', '費用']
-                                                    has_claim_word = any(word in between_text for word in claim_words)
-                                                    
-                                                    if not has_claim_word:
-                                                        is_calculation_base = True
-                                                        print(f'🔍 【後處理過濾】排除{check["description"]}: {amount:,}元 (距離: {distance}字符)')
-                                                        print(f'    上下文: ...{context[max(0, pattern_pos-10):min(len(context), amount_pos_in_context+10)]}...')
-                                                        break
-                                    if is_calculation_base:
-                                        break
-                                if is_calculation_base:
-                                    break
-                        
-                        if not is_calculation_base:
-                            filtered_amounts.append(amount)
-                    
-                    print(f"🔍 【通用格式處理器】後處理後剩餘 {len(filtered_amounts)} 個金額: {filtered_amounts}")
-                    print(f"🔍 【通用格式處理器】最終總計: {sum(filtered_amounts):,}元")
-                    return filtered_amounts
-                else:
-                    print("🔍 【通用格式處理器】提取結果不足，使用fallback策略")
-            except Exception as e:
-                print(f"🔍 【通用格式處理器】處理失敗: {e}，使用fallback策略")
-
-        # 策略2: Fallback到原有邏輯（保持兼容性）
-        return self._extract_amounts_legacy_method(text)
-
-    def _extract_amounts_legacy_method(self, text: str) -> list:
-        """原有的金額提取邏輯（作為fallback）"""
+        """智能提取有效的求償金額（基於上下文語境）"""
         import re
 
-        print(f"🔍 【傳統金額提取】Fallback到原有邏輯...")
+        print(f"🔍 【智能金額提取】原始文本: {text[:200]}...")
 
         # 1. 先預處理中文數字
         processed_text = self._comprehensive_number_preprocessing(text)
@@ -2336,19 +1760,15 @@ class HybridCoTGenerator:
             '假牙', '復健', '治療', '工作收入', '預估', '未來', '預計', '用品'
         ]
 
-        # 3. 定義排除的關鍵詞（非求償項目）- 更精確的匹配
+        # 3. 定義排除的關鍵詞（非求償項目）
         exclude_keywords = [
             '日薪', '年度所得', '月收入', '時薪', '學歷', '畢業',
-            '名下', '動產', '總計新台幣', '合計新台幣', '小計新台幣',
+            '名下', '動產', '總計', '合計', '共計', '小計',
             '包括', '其中', '包含',  # 添加細項分解關鍵詞
-            '每日', '一日', '日計', '以每日',  # 日薪相關關鍵詞
-            '每月', '月計', '以每月', '基本工資', '月薪', '底薪',  # 薪資參考數據
-            '所得', '薪資所得', '年收入',  # 薪資參考數據
+            '1日', '日1', '每日', '一日',  # 添加日薪相關關鍵詞
+            '所得', '薪資所得', '年收入', '月薪', '底薪',  # 薪資參考數據
             '此有', '可證', '為證', '收據', '發票', '證明',  # 證據相關
-            '經查', '查明', '經審理',  # 判決書用語
-            '作為計算基準', '計算基準', '基準',  # 計算基準相關
-            '共計', '總計', '合計', '小計', '計',  # 總和類關鍵詞
-            '共', '總', '合',  # 總和簡寫
+            '經查', '查明', '經審理'  # 判決書用語
         ]
 
         amounts = []
@@ -2361,20 +1781,8 @@ class HybridCoTGenerator:
             for amt_str in line_amounts:
                 try:
                     amount = int(amt_str)
-                    # 改進小額檢測邏輯：只跳過非常小的金額，但保留可能的費用
-                    if amount < 10:  # 只跳過極小額（可能是編號等）
+                    if amount < 100:  # 跳過小額（可能是編號等）
                         continue
-                    
-                    # 對於50-500元之間的金額，需要更嚴格的檢查確保是真正的費用
-                    if 10 <= amount <= 500:
-                        # 檢查是否明確提到是費用、支出等
-                        small_amount_context = line[max(0, line.find(amt_str + '元') - 30):line.find(amt_str + '元') + 20]
-                        small_amount_keywords = ['費用', '支出', '花費', '損失', '賠償', '醫療', '交通', '掛號']
-                        if not any(keyword in small_amount_context for keyword in small_amount_keywords):
-                            print(f"🔍 【小額跳過】{amount}元 - 無明確費用關鍵詞: {small_amount_context}")
-                            continue
-                        else:
-                            print(f"🔍 【小額保留】{amount}元 - 包含費用關鍵詞: {small_amount_context}")
 
                     # 檢查金額周圍的上下文
                     # 找到金額在原文中的位置
@@ -2382,19 +1790,10 @@ class HybridCoTGenerator:
                     if amount_pos == -1:
                         continue
 
-                    # 提取金額前後100個字符的上下文（擴大範圍）
-                    start = max(0, amount_pos - 100)
-                    end = min(len(line), amount_pos + 100)
+                    # 提取金額前後50個字符的上下文
+                    start = max(0, amount_pos - 50)
+                    end = min(len(line), amount_pos + 50)
                     context = line[start:end]
-                    
-                    # 也檢查整個文本中該金額的上下文（用於更準確的基準檢測）
-                    full_text_pos = clean_text.find(amt_str + '元')
-                    if full_text_pos != -1:
-                        full_start = max(0, full_text_pos - 150)
-                        full_end = min(len(clean_text), full_text_pos + 150)
-                        full_context = clean_text[full_start:full_end]
-                    else:
-                        full_context = context
 
                     # 先檢查是否包含有效求償關鍵詞
                     is_valid_claim = any(keyword in context for keyword in valid_claim_keywords)
@@ -2402,40 +1801,8 @@ class HybridCoTGenerator:
                     if is_valid_claim:
                         # 如果是有效求償項目，再檢查是否需要排除
                         should_exclude = any(keyword in context for keyword in exclude_keywords)
-                        
-                        # 檢查是否為計算基準（中間值）- 使用完整上下文
-                        calculation_pattern = f'{amount}元計算'
-                        clean_full_context = full_context.replace(',', '')
-                        is_calculation_base = (
-                            '作為計算基準' in full_context or
-                            ('以每日' in full_context and '作為計算基準' in full_context) or
-                            ('基本工資' in full_context and calculation_pattern in clean_full_context)  # 如果是 "XXX元計算" 格式就是基準
-                        )
-                        
-                        # 檢查是否為最終求償金額（金額直接跟在關鍵詞後面）
-                        claim_patterns = [
-                            f'損失為{amount}元',  # 受有之薪資損失為113625元
-                            f'共請求{amount}元',  # 共請求270000元
-                            f'支出.*{amount}元',  # 支出醫療費用255830元
-                            f'請求.*{amount}元',  # 請求慰撫金300000元
-                            f'賠償.*{amount}元'   # 賠償金額
-                        ]
-                        # 檢查時確保金額緊跟在描述後面，不是作為計算基準
-                        context_clean = context.replace(',', '')
-                        is_final_claim = False
-                        for pattern in claim_patterns:
-                            if re.search(pattern, context_clean):
-                                # 進一步檢查：如果同時包含"計算"關鍵詞，可能是基準而非最終金額
-                                if '計算' not in context or f'{amount}元計算' not in context_clean:
-                                    is_final_claim = True
-                                    break
-                        
-                        
-                        # 如果是計算基準但不是最終求償，排除
-                        if is_calculation_base and not is_final_claim:
-                            should_exclude = True
-                        # 如果是最終求償，即使包含其他排除關鍵詞也不排除    
-                        elif is_final_claim:
+                        # 特殊處理：如果是「看護費用」相關，即使包含「1日」也不排除
+                        if should_exclude and '看護' in context:
                             should_exclude = False
                         
                         if should_exclude:
@@ -2468,8 +1835,6 @@ class HybridCoTGenerator:
                                 damage_type = "預估醫療費用"
                             elif '醫療用品' in line:
                                 damage_type = "醫療用品費用"
-                            elif '醫療器材' in line:
-                                damage_type = "醫療器材費用"
                             elif '醫療' in line:
                                 damage_type = "醫療費用"
                             elif '看護' in line:
@@ -2478,7 +1843,7 @@ class HybridCoTGenerator:
                                 damage_type = "牙齒損害"
                             elif '慰撫' in line or '精神' in line:
                                 damage_type = "精神慰撫金"
-                            elif any(keyword in line for keyword in ['交通', '往返', '來回', '車費', '油費', '停車', '過路', '通行']):
+                            elif '交通' in line:
                                 damage_type = "交通費用"
                             elif '車輛' in line or '機車' in line or '修復' in line or '修理' in line or '維修' in line:
                                 damage_type = "車輛修復費用"
@@ -2502,24 +1867,13 @@ class HybridCoTGenerator:
                 final_amounts.append(amounts_list[0])
                 print(f"✅ 【採用】{damage_type}: {amounts_list[0]:,}元")
 
-        # 如果沒有找到結構化項目，使用第一階段提取的所有有效金額（去重）
-        if not final_amounts and amounts:
-            print("🔍 【備用方案】未找到結構化項目，使用第一階段的有效金額")
-            # 簡單去重：保留不同的金額
-            seen_amounts = set()
-            for amount in amounts:
-                if amount not in seen_amounts:
-                    final_amounts.append(amount)
-                    seen_amounts.add(amount)
-                    print(f"✅ 【採用】金額: {amount:,}元")
-
-        print(f"🔍 【傳統金額提取】去重後有效金額: {final_amounts}")
-        print(f"🔍 【傳統金額提取】最終總計: {sum(final_amounts):,}元")
+        print(f"🔍 【智能金額提取】去重後有效金額: {final_amounts}")
+        print(f"🔍 【智能金額提取】最終總計: {sum(final_amounts):,}元")
 
         return final_amounts
 
     def _extract_damage_items_from_text(self, text: str) -> Dict[str, List[Dict]]:
-        """從文本中精確提取損害項目 - 改善版"""
+        """從文本中精確提取損害項目"""
         # 按原告分組
         plaintiff_damages = {}
         
@@ -2527,272 +1881,54 @@ class HybridCoTGenerator:
         sentences = re.split(r'[。]', text)
         
         for sentence in sentences:
-            # 改善原告識別 - 支援更多格式
-            plaintiff_patterns = [
-                r'原告([^，。；、\s因由就支出產生之]{2,4})',     # 標準格式，避免抓取動詞
-                r'([^，。；、\s]{2,4})之醫療費用',              # 從損害項目反推原告
-                r'([^，。；、\s]{2,4})之交通費',                # 從損害項目反推原告  
-                r'([^，。；、\s]{2,4})之工資損失',              # 從損害項目反推原告
-                r'([^，。；、\s]{2,4})之慰撫金',                # 從損害項目反推原告
-                r'原告([^，。；、\s]{2,4})因',                  # 原告XX因格式
-                r'原告([^，。；、\s]{2,4})[支受]',               # 原告XX支出/受有格式
-            ]
-            
-            plaintiff = None
-            for pattern in plaintiff_patterns:
-                plaintiff_match = re.search(pattern, sentence)
-                if plaintiff_match:
-                    potential_plaintiff = plaintiff_match.group(1)
-                    # 驗證是否為有效姓名（排除無關詞彙）
-                    if self._is_valid_plaintiff_name(potential_plaintiff):
-                        plaintiff = potential_plaintiff
-                        break
-            
-            # 如果沒有找到具體姓名，檢查是否有通用的"原告"
-            if not plaintiff:
-                if '原告' in sentence and ('因' in sentence or '支出' in sentence or '受有' in sentence or '產生' in sentence):
-                    plaintiff = "原告"  # 使用通用原告標識
-                
-            if not plaintiff:
+            # 識別原告
+            plaintiff_match = re.search(r'原告([^，。；、\s]{2,4})', sentence)
+            if not plaintiff_match:
                 continue
                 
+            plaintiff = plaintiff_match.group(1)
             if plaintiff not in plaintiff_damages:
                 plaintiff_damages[plaintiff] = []
             
-            # 精確匹配各種損害類型 - 改善版
-            # ========== 精神慰撫金（絕對最高優先級 - 系統開發核心精神） ==========
-            if any(keyword in sentence for keyword in [
-                # 核心關鍵詞（最高權重）
-                '慰撫金', '精神慰撫金', 
-                # 主要關鍵詞
-                '精神賠償', '精神損害', '精神損害賠償', '精神痛苦',
-                # 法律用語
-                '非財產上之損害', '非財產損害', '人格權', '人格法益',
-                # 描述性關鍵詞
-                '身心痛苦', '精神受創', '心理創傷', '精神創傷',
-                '精神上痛苦', '身心遭受痛苦', '精神上損害', 
-                '精神上所受痛苦', '身心所受痛苦', '心靈創傷',
-                # 完整表達模式
-                '因.*身心.*痛苦', '因.*精神.*痛苦', '精神.*請求',
-                '身心.*賠償', '精神.*慰撫', '痛苦.*慰撫',
-                # 寬泛匹配（確保不遺漏）
-                '精神', '慰撫', '痛苦'
-            ]):
-                # 超級靈活的正則表達式陣列 - 涵蓋所有可能表達方式
-                amount_patterns = [
-                    # 1. 標準直接格式
-                    r'(?:慰撫金|精神慰撫金).*?(\d+(?:,\d{3})*)\s*元',
-                    r'(?:精神賠償|精神損害賠償|精神損害).*?(\d+(?:,\d{3})*)\s*元',
-                    r'(?:精神痛苦).*?(\d+(?:,\d{3})*)\s*元',
-                    
-                    # 2. 法律用語格式
-                    r'(?:非財產上之損害|非財產損害|人格權|人格法益).*?(\d+(?:,\d{3})*)\s*元',
-                    
-                    # 3. 描述性格式
-                    r'(?:身心痛苦|精神受創|心理創傷|精神創傷).*?(?:賠償|慰撫金).*?(\d+(?:,\d{3})*)\s*元',
-                    r'(?:精神上痛苦|身心遭受痛苦|精神上損害).*?(\d+(?:,\d{3})*)\s*元',
-                    
-                    # 4. 請求格式（含動作詞）
-                    r'請求.*?(?:慰撫金|精神慰撫金|精神賠償|精神損害).*?(\d+(?:,\d{3})*)\s*元',
-                    r'支出.*?(?:慰撫金|精神慰撫金|精神賠償).*?(\d+(?:,\d{3})*)\s*元',
-                    r'受有.*?(?:慰撫金|精神慰撫金|精神賠償).*?(\d+(?:,\d{3})*)\s*元',
-                    
-                    # 5. 總計格式
-                    r'(?:慰撫金|精神慰撫金|精神賠償).*?(?:總計|共計|計|合計).*?(\d+(?:,\d{3})*)\s*元',
-                    r'(?:總計|共計|計|合計).*?(?:慰撫金|精神慰撫金|精神賠償).*?(\d+(?:,\d{3})*)\s*元',
-                    
-                    # 6. 倒裝格式
-                    r'(\d+(?:,\d{3})*)\s*元.*?(?:慰撫金|精神慰撫金|精神賠償)',
-                    
-                    # 7. 複雜句式格式
-                    r'因.*?(?:事故|意外).*?(?:身心|精神).*?(?:痛苦|創傷|損害).*?(?:請求|賠償).*?(\d+(?:,\d{3})*)\s*元',
-                    r'(?:身心|精神).*?(?:痛苦|創傷|損害).*?(?:請求|賠償).*?(\d+(?:,\d{3})*)\s*元',
-                    
-                    # 8. 最寬泛匹配（包含精神或慰撫且有金額）
-                    r'精神.*?(\d+(?:,\d{3})*)\s*元',
-                    r'慰撫.*?(\d+(?:,\d{3})*)\s*元',
-                    r'痛苦.*?(\d+(?:,\d{3})*)\s*元'
-                ]
-                
-                amount_match = None
-                matched_pattern = None
-                
-                # 按順序嘗試匹配，優先使用更精確的模式
-                for i, pattern in enumerate(amount_patterns):
-                    amount_match = re.search(pattern, sentence)
-                    if amount_match:
-                        matched_pattern = i + 1
-                        break
-                
-                if amount_match:
-                    amount = int(amount_match.group(1).replace(',', ''))
-                    print(f"🎯 慰撫金檢測成功：{amount:,}元 (模式 {matched_pattern})")
-                    plaintiff_damages[plaintiff].append({
-                        'name': '精神慰撫金',
-                        'amount': amount,
-                        'description': f'{plaintiff}因本次事故所受精神痛苦之慰撫金'
-                    })
-            
-            # 未來醫療費用（優先檢查，避免被一般醫療費用誤判）
-            elif any(keyword in sentence for keyword in ['未來醫療', '將來醫療', '預估.*醫療', '15萬', '十五萬']):
-                amount_match = re.search(r'(?:未來醫療|將來醫療|預估.*醫療).*?(\d+(?:,\d{3})*)\s*元|15萬|十五萬', sentence)
-                if amount_match:
-                    # 處理"15萬"的情況
-                    if '15萬' in sentence or '十五萬' in sentence:
-                        amount = 150000
-                    else:
-                        amount = int(amount_match.group(1).replace(',', ''))
-                    
-                    plaintiff_damages[plaintiff].append({
-                        'name': '未來醫療費用',
-                        'amount': amount,
-                        'description': f'{plaintiff}因本次事故預估之未來醫療費用'
-                    })
-            
-            # 醫療費用（使用更靈活的正則表達式）
-            elif any(keyword in sentence for keyword in ['醫療費用', '醫療費', '就醫費用', '醫療']):
-                amount_match = re.search(r'(?:醫療費用|醫療費|就醫費用|醫療).*?(\d+(?:,\d{3})*)\s*元', sentence)
+            # 精確匹配各種損害類型
+            # 醫療費用
+            if '醫療費用' in sentence:
+                amount_match = re.search(r'醫療費用\s*(\d+(?:,\d{3})*)\s*元', sentence)
                 if amount_match:
                     plaintiff_damages[plaintiff].append({
                         'name': '醫療費用',
                         'amount': int(amount_match.group(1).replace(',', '')),
-                        'description': f'{plaintiff}因本次事故受傷就醫之醫療費用'
-                    })
-            
-            # 財物損失（優先檢查，避免被其他項目誤判）
-            elif any(keyword in sentence for keyword in ['財物損失', '財物', '衣物', '物品損失']):
-                amount_match = re.search(r'(?:財物損失|財物|衣物|物品損失).*?(\d+(?:,\d{3})*)\s*元', sentence)
-                if amount_match:
-                    plaintiff_damages[plaintiff].append({
-                        'name': '財物損失',
-                        'amount': int(amount_match.group(1).replace(',', '')),
-                        'description': f'{plaintiff}因本次事故所受之財物損失'
-                    })
-            
-            # 牙齒相關費用（擴展檢測範圍）
-            elif any(keyword in sentence for keyword in [
-                # 假牙相關
-                '假牙', '假牙裝置', '假牙脫落', '重新安裝假牙',
-                # 牙齒損害相關
-                '牙齒損害', '牙齒受損', '牙齒治療', '牙齒破損',
-                # 牙科相關
-                '牙科', '牙科治療', '牙醫', '口腔', '口腔治療',
-                # 通用牙齒
-                '牙齒', '齒'
-            ]) and '財物' not in sentence:
-                # 更靈活的正則表達式
-                amount_patterns = [
-                    # 標準格式
-                    r'(?:假牙|牙齒|牙科|口腔|齒).*?(?:費用|損害|治療|裝置).*?(\d+(?:,\d{3})*)\s*元',
-                    # 損害費用格式
-                    r'(?:牙齒損害費用|牙科費用|假牙費用|口腔.*?費用).*?(\d+(?:,\d{3})*)\s*元',
-                    # 治療費用格式
-                    r'(?:牙齒|假牙|牙科|口腔).*?治療.*?費用.*?(\d+(?:,\d{3})*)\s*元',
-                    # 寬泛匹配
-                    r'(?:牙齒|假牙|牙科|口腔|齒).*?(\d+(?:,\d{3})*)\s*元'
-                ]
-                
-                amount_match = None
-                for pattern in amount_patterns:
-                    amount_match = re.search(pattern, sentence)
-                    if amount_match:
-                        break
-                
-                if amount_match:
-                    # 根據內容判斷具體類型
-                    if any(word in sentence for word in ['假牙', '裝置', '脫落', '重新安裝']):
-                        damage_name = '假牙費用'
-                        description = f'{plaintiff}因本次事故所需之假牙費用'
-                    elif any(word in sentence for word in ['損害', '受損', '破損']):
-                        damage_name = '牙齒損害費用'
-                        description = f'{plaintiff}因本次事故牙齒受損之治療費用'
-                    elif any(word in sentence for word in ['口腔']):
-                        damage_name = '口腔治療費用'
-                        description = f'{plaintiff}因本次事故所需之口腔治療費用'
-                    elif any(word in sentence for word in ['治療', '牙科', '牙醫']):
-                        damage_name = '牙科治療費用'
-                        description = f'{plaintiff}因本次事故所需之牙科治療費用'
-                    else:
-                        damage_name = '牙齒相關費用'
-                        description = f'{plaintiff}因本次事故之牙齒相關費用'
-                    
-                    print(f"🦷 牙齒相關費用檢測成功：{damage_name} {int(amount_match.group(1).replace(',', '')):,}元")
-                    plaintiff_damages[plaintiff].append({
-                        'name': damage_name,
-                        'amount': int(amount_match.group(1).replace(',', '')),
-                        'description': description
-                    })
-            
-            # 手術費用
-            elif any(keyword in sentence for keyword in ['手術', '開刀', '手術費']):
-                amount_match = re.search(r'(?:手術|開刀|手術費).*?(\d+(?:,\d{3})*)\s*元', sentence)
-                if amount_match:
-                    plaintiff_damages[plaintiff].append({
-                        'name': '手術費用',
-                        'amount': int(amount_match.group(1).replace(',', '')),
-                        'description': f'{plaintiff}因本次事故所需之手術費用'
-                    })
-            
-            # 營養品費用
-            elif any(keyword in sentence for keyword in ['營養品', '膠原蛋白', '營養', '補品']):
-                amount_match = re.search(r'(?:營養品|膠原蛋白|營養|補品).*?(\d+(?:,\d{3})*)\s*元', sentence)
-                if amount_match:
-                    plaintiff_damages[plaintiff].append({
-                        'name': '營養品費用',
-                        'amount': int(amount_match.group(1).replace(',', '')),
-                        'description': f'{plaintiff}因本次事故所需之營養品費用'
-                    })
-            
-            # 看護費用
-            elif any(keyword in sentence for keyword in ['看護', '照護', '護理', '看護費']):
-                amount_match = re.search(r'(?:看護|照護|護理|看護費).*?(\d+(?:,\d{3})*)\s*元', sentence)
-                if amount_match:
-                    plaintiff_damages[plaintiff].append({
-                        'name': '看護費用',
-                        'amount': int(amount_match.group(1).replace(',', '')),
-                        'description': f'{plaintiff}因本次事故所需之看護費用'
+                        'description': f'原告{plaintiff}因本次事故受傷就醫之醫療費用'
                     })
             
             # 交通費
-            elif any(keyword in sentence for keyword in ['交通費用', '交通費', '往返費用', '來回費用', '車費', '油費', '停車費', '過路費', '通行費']):
-                # 使用更靈活的正則表達式，允許關鍵詞和金額之間有其他文字
-                amount_match = re.search(r'(?:交通費用|交通費|往返費用|來回費用|車費|油費|停車費|過路費|通行費).*?(\d+(?:,\d{3})*)\s*元', sentence)
+            if '交通費' in sentence:
+                amount_match = re.search(r'交通費\s*(\d+(?:,\d{3})*)\s*元', sentence)
                 if amount_match:
                     plaintiff_damages[plaintiff].append({
                         'name': '交通費用',
                         'amount': int(amount_match.group(1).replace(',', '')),
-                        'description': f'{plaintiff}因本次事故所生之交通費用'
-                    })
-            
-            # 勞動能力減損（優先檢查，避免被工作損失誤判）
-            elif any(keyword in sentence for keyword in ['勞動能力', '勞動損失', '減少勞動', '勞動減少', '失能']):
-                amount_match = re.search(r'(?:勞動能力|勞動損失|減少勞動|勞動減少|失能).*?(\d+(?:,\d{3})*)\s*元', sentence)
-                if amount_match:
-                    plaintiff_damages[plaintiff].append({
-                        'name': '勞動能力減損',
-                        'amount': int(amount_match.group(1).replace(',', '')),
-                        'description': f'{plaintiff}因本次事故勞動能力減損之損失'
+                        'description': f'原告{plaintiff}因本次事故所生之交通費用'
                     })
             
             # 工作損失
-            elif any(keyword in sentence for keyword in ['工資損失', '薪資損失', '工作損失', '不能工作', '無法工作', '收入損失']):
-                amount_match = re.search(r'(?:工資損失|薪資損失|工作損失|收入損失|損失|受有).*?(\d+(?:,\d{3})*)\s*元', sentence)
+            if any(keyword in sentence for keyword in ['工資損失', '不能工作', '無法工作']):
+                amount_match = re.search(r'(?:損失|請求)\s*(\d+(?:,\d{3})*)\s*元', sentence)
                 if amount_match:
                     plaintiff_damages[plaintiff].append({
                         'name': '工作損失',
                         'amount': int(amount_match.group(1).replace(',', '')),
-                        'description': f'{plaintiff}因本次事故無法工作之收入損失'
+                        'description': f'原告{plaintiff}因本次事故無法工作之收入損失'
                     })
             
-            
-            # 車輛維修費用
-            elif any(keyword in sentence for keyword in ['車輛維修', '維修費', '修理費', '車輛修理']):
-                amount_match = re.search(r'(?:車輛維修|維修費|修理費|車輛修理).*?(\d+(?:,\d{3})*)\s*元', sentence)
+            # 精神慰撫金
+            if '慰撫金' in sentence:
+                amount_match = re.search(r'慰撫金\s*(\d+(?:,\d{3})*)\s*元', sentence)
                 if amount_match:
                     plaintiff_damages[plaintiff].append({
-                        'name': '車輛維修費',
+                        'name': '精神慰撫金',
                         'amount': int(amount_match.group(1).replace(',', '')),
-                        'description': f'{plaintiff}因本次事故車輛維修之費用'
+                        'description': f'原告{plaintiff}因本次事故所受精神痛苦之慰撫金'
                     })
             
             # 車輛貶值
@@ -2815,85 +1951,7 @@ class HybridCoTGenerator:
                         'description': '車輛損害鑑定費用'
                     })
         
-        # 處理共同費用分配
-        plaintiff_damages = self._handle_shared_costs(plaintiff_damages, text)
-        
         return plaintiff_damages
-    
-    def _handle_shared_costs(self, plaintiff_damages: Dict[str, List[Dict]], text: str) -> Dict[str, List[Dict]]:
-        """處理共同費用的分配"""
-        if len(plaintiff_damages) <= 1:
-            return plaintiff_damages
-        
-        # 檢測共同費用項目
-        shared_costs = []
-        plaintiffs = list(plaintiff_damages.keys())
-        
-        # 找出被分配給第一個原告但應該是共同費用的項目
-        for plaintiff, damages in plaintiff_damages.items():
-            for damage in damages[:]:  # 使用切片避免修改過程中出錯
-                # 檢查該費用是否在共同損害段落中提到
-                if self._is_shared_cost(damage, text, plaintiffs):
-                    shared_costs.append(damage)
-                    damages.remove(damage)  # 從個人費用中移除
-        
-        # 將共同費用平分給所有原告
-        if shared_costs:
-            print(f"🔍 檢測到 {len(shared_costs)} 項共同費用需要分配")
-            for shared_cost in shared_costs:
-                shared_amount = shared_cost['amount']
-                split_amount = shared_amount // len(plaintiffs)
-                
-                print(f"   {shared_cost['name']} {shared_amount:,}元 → 每人 {split_amount:,}元")
-                
-                for plaintiff in plaintiffs:
-                    if plaintiff not in plaintiff_damages:
-                        plaintiff_damages[plaintiff] = []
-                    
-                    plaintiff_damages[plaintiff].append({
-                        'name': shared_cost['name'],
-                        'amount': split_amount,
-                        'description': f"原告{plaintiff}分攤之{shared_cost['name']}"
-                    })
-        
-        return plaintiff_damages
-    
-    def _is_shared_cost(self, damage: Dict, text: str, plaintiffs: List[str]) -> bool:
-        """判斷是否為共同費用"""
-        # 更精確地檢查是否在共同損害段落中
-        shared_section_pattern = r'[（(][三3][）)].*?原告.*?、.*?共同.*?損害.*?(?=[（(][四4][）)]|四、|$)'
-        shared_section_match = re.search(shared_section_pattern, text, re.DOTALL)
-        
-        if not shared_section_match:
-            return False
-        
-        shared_section_text = shared_section_match.group(0)
-        
-        # 檢查該費用的金額是否在共同段落中出現
-        damage_amount = damage['amount']
-        amount_pattern = f"{damage_amount:,}元"
-        
-        # 同時檢查金額和費用類型關鍵詞
-        damage_keywords = {
-            '看護費用': ['看護', '照護', '護理'],
-            '交通費用': ['交通', '車費', '計程車'],
-            '醫療費用': ['醫療'],
-            '手術費用': ['手術'],
-            '假牙費用': ['假牙', '牙齒'],
-            '精神慰撫金': ['慰撫', '精神']
-        }
-        
-        if damage['name'] in damage_keywords:
-            keywords = damage_keywords[damage['name']]
-            
-            # 檢查金額是否在共同段落中
-            if amount_pattern in shared_section_text:
-                # 檢查對應的關鍵詞是否也在同一段落中
-                if any(keyword in shared_section_text for keyword in keywords):
-                    print(f"   ✅ {damage['name']} {damage_amount:,}元 確認為共同費用")
-                    return True
-        
-        return False
     
     def _format_damage_items(self, damage_items: Dict[str, List[Dict]]) -> str:
         """格式化損害項目"""
@@ -2916,83 +1974,6 @@ class HybridCoTGenerator:
         # 總計
         total = sum(sum(d['amount'] for d in damages) for damages in damage_items.values())
         result += f"\n損害總計：新台幣{total:,}元整"
-        
-        return result
-    
-    def _is_valid_plaintiff_name(self, name: str) -> bool:
-        """驗證是否為有效的原告姓名"""
-        if not name or len(name) < 2 or len(name) > 5:
-            return False
-        
-        # 排除無關詞彙，但不包含可能出現在姓名中的字
-        invalid_keywords = [
-            '醫療', '交通', '工資', '損失', '費用', '慰撫', '精神',
-            '車輛', '貶值', '鑑定', '賠償', '元', '因', '受', '支出',
-            '就醫', '事故', '本次', '所', '之', '等', '共', '計',
-            '包含', '總', '合', '金額', '項目', '主張', '根據', '媳婦',
-            '全日', '法定', '代理', '診斷', '證明', '依照', '參考'
-        ]
-        
-        for keyword in invalid_keywords:
-            if keyword in name:
-                return False
-        
-        # 檢查是否包含數字
-        if any(char.isdigit() for char in name):
-            return False
-        
-        # 檢查是否為常見的中文姓名格式
-        # 簡單的中文字符檢查
-        chinese_char_count = sum(1 for char in name if '\u4e00' <= char <= '\u9fff')
-        return chinese_char_count >= 2  # 至少包含2個中文字符
-    
-    def _standardize_names_in_facts(self, facts_text: str, parties: dict) -> str:
-        """統一事實段落中的姓名，確保與當事人信息一致"""
-        if not parties:
-            return facts_text
-        
-        result = facts_text
-        
-        # 處理原告姓名統一
-        if '原告' in parties and parties['原告'] != '原告':
-            correct_plaintiffs = [name.strip() for name in parties['原告'].split('、') if name.strip()]
-            
-            # 查找並替換可能的姓名變體
-            for correct_name in correct_plaintiffs:
-                if len(correct_name) >= 2:
-                    # 查找相似姓名（可能是筆誤或不同寫法）
-                    # 例如：羅蘭崴 -> 羅靖崴
-                    surname = correct_name[0]  # 取姓氏
-                    
-                    # 查找以相同姓氏開頭但名字不同的可能變體
-                    import re
-                    pattern = rf'原告{surname}[^，。；、\s]{{1,3}}'
-                    matches = re.finditer(pattern, result)
-                    
-                    for match in matches:
-                        found_name = match.group(0).replace('原告', '')
-                        if found_name != correct_name and len(found_name) == len(correct_name):
-                            # 替換為正確姓名
-                            result = result.replace(f'原告{found_name}', f'原告{correct_name}')
-                            print(f"🔧 姓名統一: '{found_name}' -> '{correct_name}'")
-        
-        # 處理被告姓名統一（類似邏輯）
-        if '被告' in parties and parties['被告'] != '被告':
-            correct_defendants = [name.strip() for name in parties['被告'].split('、') if name.strip()]
-            
-            for correct_name in correct_defendants:
-                if len(correct_name) >= 2:
-                    surname = correct_name[0]
-                    
-                    import re
-                    pattern = rf'被告{surname}[^，。；、\s]{{1,3}}'
-                    matches = re.finditer(pattern, result)
-                    
-                    for match in matches:
-                        found_name = match.group(0).replace('被告', '')
-                        if found_name != correct_name and len(found_name) == len(correct_name):
-                            result = result.replace(f'被告{found_name}', f'被告{correct_name}')
-                            print(f"🔧 姓名統一: '{found_name}' -> '{correct_name}'")
         
         return result
 
@@ -3157,15 +2138,62 @@ def interactive_generate_lawsuit():
             except Exception as e:
                 similar_cases = []
         
-        # ===== 開始混合模式生成 =====
-        print(f"\n🎯 開始混合模式生成...")
+        # ===== 選擇生成模式 =====
+        print(f"\n🎯 請選擇生成模式：")
+        print("1. 標準混合模式（事實+法條+損害：標準方式，結論：CoT方式）")
+        print("2. 雙輪CoT模式（生成→檢查→修正的完整驗證流程）")
+        
+        while True:
+            try:
+                mode_choice = input("請選擇模式 (1 或 2): ").strip()
+                if mode_choice in ['1', '2']:
+                    break
+                print("請輸入 1 或 2")
+            except KeyboardInterrupt:
+                print("\n👋 用戶中斷，程序退出")
+                return
+        
+        if mode_choice == '2':
+            # ===== 雙輪CoT模式 =====
+            print(f"\n🔄 開始雙輪CoT模式生成...")
+            print("📝 輪1：生成完整起訴狀")
+            print("🔍 輪2：檢查驗證並修正")
+            print()
+            
+            # 使用雙輪CoT生成完整起訴狀
+            final_result = generator.generate_complete_dual_round_cot(
+                accident_facts,
+                sections.get("compensation_facts", user_query),
+                parties,
+                similar_cases,
+                final_case_ids if 'final_case_ids' in locals() else []
+            )
+            
+            # 輸出完整結果
+            print("=" * 60)
+            print("⚖️ 適用法條")
+            print("=" * 60)
+            for i, law in enumerate(final_result.get('applicable_laws', []), 1):
+                print(f"{i}. {law}")
+            
+            print("\n" + "=" * 60)
+            print("📋 生成的起訴狀")
+            print("=" * 60)
+            print(final_result.get('lawsuit', ''))
+            
+            print("\n" + "=" * 60)
+            print("✅ 起訴狀生成完成!")
+            return
+        
+        # ===== 標準混合模式生成 =====
+        print(f"\n🎯 開始標準混合模式生成...")
         print("📝 事實 + 法條 + 損害：標準方式")
         print("🧠 結論：CoT方式（計算總金額）")
         print()
         
         # 生成事實段落
         print("📝 生成事實段落...")
-        facts = generator.generate_standard_facts(accident_facts, similar_cases, parties)
+        facts = generator.generate_standard_facts(accident_facts, similar_cases)
         print("✅ 事實段落生成完成")
         
         # 生成法律依據
@@ -3206,7 +2234,7 @@ def interactive_generate_lawsuit():
         print("🧠 生成CoT結論（含總金額計算）...")
         conclusion = generator.generate_cot_conclusion_with_structured_analysis(
             sections.get("accident_facts", user_query),
-            damages,  # 使用生成後的損害段落，而不是原始輸入
+            compensation_text,
             parties
         )
         print("✅ CoT結論生成完成")
@@ -3242,7 +2270,9 @@ def interactive_generate_lawsuit():
         print("✅ 起訴狀生成完成!")
         
     except Exception as e:
+        import traceback
         print(f"❌ 生成過程中發生錯誤：{str(e)}")
+        print(f"❌ 詳細錯誤信息：{traceback.format_exc()}")
         print("請檢查輸入格式或聯繫系統管理員")
 
 def main():
