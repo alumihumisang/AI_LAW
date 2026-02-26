@@ -1,0 +1,13 @@
+2025-11-13 07:07:52,469 - ✅ 成功連接至 Neo4j
+2025-11-13 07:07:52,470 - 🧪 測試模式：只處理前 3 個案件
+2025-11-13 07:07:55,342 - 🔄 處理案件 1...
+2025-11-13 07:08:20,321 - ✅ 案件 1 完成，共 4 個段落
+2025-11-13 07:08:20,321 - 🔄 處理案件 2...
+2025-11-13 07:08:39,879 - ✅ 案件 2 完成，共 4 個段落
+2025-11-13 07:08:39,879 - 🔄 處理案件 3...
+2025-11-13 07:09:04,564 - ✅ 案件 3 完成，共 4 個段落
+2025-11-13 07:09:04,565 - Received notification from DBMS server: <GqlStatusObject gql_status='01N52', status_description='warn: property key does not exist. The property `lawyer_input` does not exist in database `neo4j`. Verify that the spelling is correct.', position=<SummaryInputPosition line=16, column=16, offset=725>, raw_classification='UNRECOGNIZED', classification=<NotificationClassification.UNRECOGNIZED: 'UNRECOGNIZED'>, raw_severity='WARNING', severity=<NotificationSeverity.WARNING: 'WARNING'>, diagnostic_record={'_classification': 'UNRECOGNIZED', '_severity': 'WARNING', '_position': {'offset': 725, 'line': 16, 'column': 16}, 'OPERATION': '', 'OPERATION_CODE': '0', 'CURRENT_SCHEMA': '/'}> for query: '\n        MATCH (c:Case)\n        OPTIONAL MATCH (c)-[:包含]->(f:Facts)\n        OPTIONAL MATCH (c)-[:包含]->(f)-[:適用]->(l:Laws)\n        OPTIONAL MATCH (c)-[:包含]->(f)-[:適用]->(l)-[:計算]->(comp:Compensation)\n        OPTIONAL MATCH (c)-[:包含]->(f)-[:適用]->(l)-[:計算]->(comp)-[:推導]->(con:Conclusion)\n        OPTIONAL MATCH (c)-[:包含]->(li:LawyerInput)\n        OPTIONAL MATCH (li)-[:因]->(cause:LawyerInput_Cause)\n        OPTIONAL MATCH (li)-[:果]->(effect:LawyerInput_Effect)\n        RETURN\n            c.case_id AS case_id,\n            f.description AS indictment_fact,\n            l.description AS indictment_laws,\n            comp.description AS indictment_compensation,\n            con.description AS indictment_conclusion,\n            li.lawyer_input AS lawyer_input_fact,\n            cause.description AS lawyer_input_cause,\n            effect.description AS lawyer_input_injury\n        ORDER BY c.case_id\n         LIMIT 3'
+2025-11-13 07:09:04,565 - 🎉 所有案件處理完成！輸出至 structured_summaries_test_3.jsonl
+2025-11-13 07:09:04,565 - 
+✅ 完成！輸出檔案：structured_summaries_test_3.jsonl
+2025-11-13 07:09:04,565 - 📝 請檢查輸出檔案確認提取品質

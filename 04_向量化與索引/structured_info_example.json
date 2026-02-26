@@ -1,0 +1,93 @@
+{
+  "Facts段落範例": {
+    "time_info": "2024年3月15日上午10時許",
+    "location_info": "台北市中正區重慶南路一段122號前",
+    "parties": {
+      "plaintiff": {
+        "name": "甲○○",
+        "vehicles": ["車牌ABC-1234自小客車"],
+        "role": "直行車輛駕駛"
+      },
+      "defendant": {
+        "name": "乙○○",
+        "vehicles": ["車牌XYZ-5678機車"],
+        "role": "左轉車輛駕駛"
+      }
+    },
+    "accident_process": {
+      "defendant_fault": ["未注意車前狀況", "貿然左轉"],
+      "plaintiff_action": ["正常直行"],
+      "collision_manner": "被告左轉車輛撞擊原告直行車輛右前側"
+    },
+    "injuries": [
+      {
+        "person": "原告",
+        "injury_description": "頭部外傷、右小腿骨折",
+        "treatment": "需手術治療"
+      }
+    ],
+    "evidence": {
+      "witnesses": ["證人王○○"],
+      "documents": ["診斷證明書", "事故鑑定書"]
+    }
+  },
+
+  "Laws段落範例": {
+    "applicable_laws": [
+      {
+        "article": "民法第184條第1項前段",
+        "reason": "因過失侵害他人權利",
+        "supporting_facts": ["被告未注意車前狀況"]
+      },
+      {
+        "article": "民法第195條第1項前段",
+        "reason": "侵害身體健康",
+        "supporting_facts": ["造成原告頭部外傷、骨折"]
+      }
+    ],
+    "law_chain": ["184-1前段", "193-1", "195-1前段"]
+  },
+
+  "Compensation段落範例": {
+    "expenses": [
+      {
+        "item": "醫療費用",
+        "amount": 150000,
+        "supporting_text": "原告支出醫療費用150,000元，有收據可證"
+      },
+      {
+        "item": "看護費用",
+        "amount": 80000,
+        "supporting_text": "原告需專人看護，每日2,000元，共40日"
+      },
+      {
+        "item": "護具費用",
+        "amount": 9500,
+        "supporting_text": "原告因本件事故受傷,有購買必要護具之需求,共計支出9,500元"
+      },
+      {
+        "item": "精神慰撫金",
+        "amount": 300000,
+        "supporting_text": "原告因此精神痛苦，請求精神慰撫金300,000元"
+      }
+    ],
+    "total_claimed": 539500,
+    "deductions": [
+      {
+        "reason": "已給付之強制險理賠金",
+        "amount": 50000
+      }
+    ],
+    "設計說明": "不做category分類，完整保留原文的項目名稱。等未來訓練分類器或跟老師討論後再決定分類策略。檢索時使用supporting_text的語義向量相似度。"
+  },
+
+  "Conclusion段落範例": {
+    "total_claimed": 480000,
+    "interest": {
+      "rate": "年息5%",
+      "start_date": "起訴狀繕本送達翌日"
+    },
+    "litigation_costs": "請求由被告負擔",
+    "payment_terms": "請求一次給付"
+  }
+}
