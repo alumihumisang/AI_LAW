@@ -1,0 +1,9 @@
+=== XRAG Phase 2: Build Knowledge Graph ===
+Phase 1 資料：6057 筆
+律師輸入：6057 筆
+清除舊資料
+  Trie 節點建立完成：101 個
+  Trie 邊建立完成：96 條
+  Case 節點建立完成：6057 個
+
+完成！節點：6158，關聯：6153

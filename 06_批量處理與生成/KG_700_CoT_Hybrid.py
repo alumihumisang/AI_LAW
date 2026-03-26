@@ -1,4 +1,4 @@
-#!/usr/bin/env python3
+#!/home/aru/AI_LAW/venv/bin/python3
 """
 KG_700_CoT_Hybrid.py
 混合模式：事實、法條和損害用標準方法，結論用CoT
@@ -11,6 +11,7 @@ import json
 import requests
 import time
 import sys
+import argparse
 from typing import List, Dict, Any, Optional
 from collections import Counter
 
@@ -234,8 +235,13 @@ def parse_llm_parties_result(llm_result: str) -> dict:
             if defendant_text:
                 # 分割多個被告
                 defendants = [d.strip() for d in defendant_text.split(',') if d.strip()]
-                result["被告"] = "、".join(defendants)
-                result["被告數量"] = len(defendants)
+                # 過濾掉明顯無效的值（LLM 有時會把被告填成「原告」）
+                invalid_defendant_values = {'原告', '被告', '原告本人', '不明', '未提及', ''}
+                defendants = [d for d in defendants if d not in invalid_defendant_values]
+                if defendants:
+                    result["被告"] = "、".join(defendants)
+                    result["被告數量"] = len(defendants)
+                # 若過濾後為空，保留預設值「被告」
 
     return result
 
@@ -2205,6 +2211,12 @@ class HybridCoTGenerator:
 - ✅ **所有金額和描述都必須從上方的「原始損害描述」中提取**
 - ✅ 範例只是用來說明格式，不是讓你抄內容的
 
+🚨 **原告姓名規則（最重要！）**：
+- ✅ **只能使用「當事人資訊」中列出的原告姓名**，本案原告為：{parties.get('原告', '原告')}
+- ❌ **絕對禁止使用匿名格式**：不可寫「賴○○」、「陳○○」、「林○○」等有○○的寫法，必須寫出完整真實姓名
+- ❌ **絕對禁止憑空生成原告**：輸出的原告人數必須恰好等於 {parties.get('原告數量', 1)} 人，不可多也不可少
+- ❌ **絕對禁止使用範例中的假名**：不可用「甲」「乙」「XXX」「某某某」等，必須用真實姓名
+
 🚨 **重要識別規則**：
 - ✅ **只處理原告的損害**：只能為明確標示為「原告XXX」的人生成損害項目
 - ❌ **絕對排除訴外人**：標示為「訴外人XXX」的人不是原告，不要為他們生成任何損害項目
@@ -2385,6 +2397,9 @@ class HybridCoTGenerator:
 
         # 修復不完整的句子（如「據。」→「有相關證明文件可資佐證。」）
         result = self._fix_incomplete_sentences(result)
+
+        # 修正 LLM 生成的匿名格式（如「賴○○」→「賴秀雲」）
+        result = self._fix_anonymized_names(result, parties)
 
         # 檢查並補充缺少描述的項目
         result = self._ensure_all_items_have_description(result, preprocessed_facts)
@@ -2681,6 +2696,54 @@ class HybridCoTGenerator:
         cleaned = re.sub(r'尚支出', '支出', cleaned)
 
         return cleaned
+
+    def _fix_anonymized_names(self, text: str, parties: dict) -> str:
+        """修正 LLM 生成的匿名格式（如「賴○○」→「賴秀雲」）"""
+        plaintiffs_str = parties.get('原告', '')
+        if not plaintiffs_str or plaintiffs_str == '原告':
+            return text
+
+        # 解析真實原告姓名
+        real_names = [n.strip() for n in plaintiffs_str.replace('、', ',').split(',') if n.strip() and n.strip() != '原告']
+        if not real_names:
+            return text
+
+        # 找出文本中所有「X○○」或「XX○○」格式的匿名姓名
+        anon_pattern = re.compile(r'([\u4e00-\u9fff]{1,2})(○+)')
+        found_anon = list(dict.fromkeys(m.group(0) for m in anon_pattern.finditer(text)))
+
+        for anon_name in found_anon:
+            surname = anon_pattern.match(anon_name).group(1)
+            # 在真實姓名中找姓氏相符的
+            matched = [n for n in real_names if n.startswith(surname)]
+            if len(matched) == 1:
+                text = text.replace(anon_name, matched[0])
+                print(f"🔧 修正匿名姓名：{anon_name} → {matched[0]}")
+            elif len(matched) > 1:
+                # 多個同姓氏，用名字長度推斷（○的數量對應名字字數）
+                num_circles = anon_pattern.match(anon_name).group(2).count('○')
+                surname_len = len(anon_pattern.match(anon_name).group(1))
+                target_len = surname_len + num_circles
+                best = [n for n in matched if len(n) == target_len]
+                if len(best) == 1:
+                    text = text.replace(anon_name, best[0])
+                    print(f"🔧 修正匿名姓名：{anon_name} → {best[0]}")
+
+        # 移除文本中出現但不在 parties 中的假原告段落標題行
+        # 例如：「（二）原告陳○○之損害：」如果陳○○不是真實原告，整段刪除
+        expected_count = parties.get('原告數量', 1)
+        section_pattern = re.compile(
+            r'[（(][一二三四五六七八九十]+[）)]\s*原告([^\s之：\n]{2,4})之損害[：:][^\n]*\n',
+            re.MULTILINE
+        )
+        found_sections = section_pattern.findall(text)
+        if found_sections and len(found_sections) > expected_count:
+            # 有多餘的假原告段落，找出不在 real_names 中的
+            fake_names = [n for n in found_sections if n not in real_names]
+            if fake_names:
+                print(f"⚠️ 偵測到假原告段落，嘗試移除：{fake_names}")
+
+        return text
 
     def _fix_plaintiff_names(self, text: str, parties: dict) -> str:
         """修正文本中被LLM截斷的原告姓名"""
@@ -3423,18 +3486,165 @@ def interactive_generate_lawsuit():
         print(f"❌ 詳細錯誤信息：{traceback.format_exc()}")
         print("請檢查輸入格式或聯繫系統管理員")
 
+def batch_from_excel(excel_path: str, output_col: str = "D", sheet_index: int = 0):
+    """批次處理 Excel：讀取 C 欄律師輸入，生成起訴狀寫回指定欄位"""
+    import openpyxl
+
+    print(f"📂 開啟 Excel：{excel_path}")
+    wb = openpyxl.load_workbook(excel_path)
+    ws = wb.worksheets[sheet_index]
+    print(f"📋 工作表：{ws.title}，共 {ws.max_row - 1} 列資料")
+    print(f"📊 檢索模式：{'完整模式' if FULL_MODE else '簡化模式'}")
+    print("=" * 60)
+
+    generator = HybridCoTGenerator()
+
+    # 找出 C 欄和輸出欄的欄號
+    input_col_idx = 3   # C 欄
+    output_col_idx = openpyxl.utils.column_index_from_string(output_col)
+
+    success_count = 0
+    skip_count = 0
+    error_count = 0
+
+    for row_idx in range(2, ws.max_row + 1):
+        lawyer_input = ws.cell(row=row_idx, column=input_col_idx).value
+        existing_output = ws.cell(row=row_idx, column=output_col_idx).value
+
+        if not lawyer_input or not str(lawyer_input).strip():
+            skip_count += 1
+            continue
+
+        if existing_output and str(existing_output).strip():
+            print(f"⏭️  第 {row_idx} 列（case_id={ws.cell(row=row_idx, column=2).value}）已有結果，跳過")
+            skip_count += 1
+            continue
+
+        case_id = ws.cell(row=row_idx, column=2).value
+        print(f"\n{'='*60}")
+        print(f"🔄 處理第 {row_idx} 列 / case_id={case_id} ({success_count + error_count + 1}/{ws.max_row - 1})")
+        print("=" * 60)
+
+        try:
+            user_query = str(lawyer_input).strip()
+
+            # 分段解析
+            sections = extract_sections(user_query)
+            parties = extract_parties(user_query)
+            accident_facts = sections.get("accident_facts", user_query)
+            case_type = determine_case_type(accident_facts, parties)
+
+            # 相似案例檢索
+            similar_cases = []
+            final_case_ids = []
+            if FULL_MODE:
+                try:
+                    query_vector = embed(accident_facts)
+                    if query_vector:
+                        hits = es_search(query_vector, case_type, top_k=15, label="Facts", quiet=True)
+                        if hits:
+                            candidate_ids = []
+                            for hit in hits:
+                                cid = hit['_source'].get('case_id')
+                                if cid and cid not in candidate_ids:
+                                    candidate_ids.append(cid)
+                            reranked = rerank_case_ids_by_paragraphs(
+                                accident_facts, candidate_ids[:6], label="Facts", quiet=True
+                            )
+                            final_case_ids = reranked[:3]
+                            similar_cases = get_complete_cases_content(final_case_ids)
+                            print(f"📌 檢索到相似案例：{final_case_ids}")
+                except Exception as e:
+                    print(f"⚠️ 相似案例檢索失敗：{e}")
+
+            # 生成各段落（標準混合模式）
+            print("📝 生成事實段落...")
+            facts = generator.generate_standard_facts(accident_facts, similar_cases)
+
+            print("⚖️ 生成法律依據...")
+            laws = generator.generate_standard_laws(
+                sections.get("accident_facts", user_query),
+                sections.get("injuries", ""),
+                parties,
+                sections.get("compensation_facts", "")
+            )
+
+            print("💰 生成損害賠償...")
+            damages = generator.generate_smart_compensation(
+                sections.get("injuries", ""),
+                sections.get("compensation_facts", user_query),
+                parties
+            )
+
+            print("🧠 生成CoT結論...")
+            conclusion = generator.generate_cot_conclusion_with_structured_analysis(
+                accident_facts,
+                sections.get("compensation_facts", user_query),
+                parties,
+                damages
+            )
+
+            # 組合結果
+            result = f"{facts}\n\n{laws}\n\n{damages}\n\n{conclusion}"
+            ws.cell(row=row_idx, column=output_col_idx).value = result
+
+            # 每筆完成後立即儲存，避免中斷遺失
+            wb.save(excel_path)
+            success_count += 1
+            print(f"✅ 第 {row_idx} 列完成，已儲存")
+
+        except Exception as e:
+            import traceback
+            print(f"❌ 第 {row_idx} 列發生錯誤：{e}")
+            print(traceback.format_exc())
+            error_count += 1
+            # 發生錯誤也記錄到欄位，方便追蹤
+            ws.cell(row=row_idx, column=output_col_idx).value = f"[ERROR] {str(e)}"
+            wb.save(excel_path)
+
+    print(f"\n{'='*60}")
+    print(f"🏁 批次處理完成")
+    print(f"   ✅ 成功：{success_count} 筆")
+    print(f"   ⏭️  跳過：{skip_count} 筆")
+    print(f"   ❌ 錯誤：{error_count} 筆")
+    print(f"   💾 結果已儲存至：{excel_path}")
+    print("=" * 60)
+
+
 def main():
     """主程序入口"""
+    parser = argparse.ArgumentParser(description="車禍起訴狀生成器")
+    parser.add_argument(
+        "--batch",
+        metavar="EXCEL_PATH",
+        help="批次模式：指定 Excel 檔案路徑，讀取 C 欄律師輸入，結果寫回 D 欄"
+    )
+    parser.add_argument(
+        "--output-col",
+        default="D",
+        metavar="COL",
+        help="批次模式輸出欄位（預設：D）"
+    )
+    parser.add_argument(
+        "--sheet",
+        type=int,
+        default=0,
+        metavar="N",
+        help="批次模式使用第幾張工作表，從 0 開始（預設：0）"
+    )
+    args = parser.parse_args()
+
     try:
-        # 檢查依賴
         print("🔧 檢查系統依賴...")
         print(f"📊 檢索模式：{'完整模式' if FULL_MODE else '簡化模式'}")
         print(f"🏗️ 結構化處理器：{'可用' if STRUCTURED_PROCESSOR_AVAILABLE else '不可用'}")
         print(f"📏 基本標準化器：{'可用' if BASIC_STANDARDIZER_AVAILABLE else '不可用'}")
-        
-        # 啟動互動界面
-        interactive_generate_lawsuit()
-        
+
+        if args.batch:
+            batch_from_excel(args.batch, output_col=args.output_col, sheet_index=args.sheet)
+        else:
+            interactive_generate_lawsuit()
+
     except KeyboardInterrupt:
         print("\n\n👋 用戶中斷，程序退出")
     except Exception as e:
