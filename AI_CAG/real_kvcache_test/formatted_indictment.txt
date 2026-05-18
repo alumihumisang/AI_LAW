@@ -1,0 +1,23 @@
+=== CAG生成的完整起訴書 ===
+
+輸入事故事實：
+被告於民國113年1月10日下午2時許，駕駛自用小客車，因未注意車前狀況，撞擊正在人行道上之原告，致原告受有頭部外傷、左腿骨折，醫療費用3萬元，請求精神慰撫金15萬元。
+
+生成結果：
+
+一、事實部分：
+生成失敗: 'str' object has no attribute 'shape'
+
+二、法條部分：
+生成失敗: 'str' object has no attribute 'shape'
+
+三、賠償部分：
+生成失敗: 'str' object has no attribute 'shape'
+
+四、結論部分：
+生成失敗: 'str' object has no attribute 'shape'
+
+=== 完整起訴書 ===
+生成失敗: 'str' object has no attribute 'shape'
+
+生成時間: 0.04秒

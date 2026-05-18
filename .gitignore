@@ -1,0 +1,4 @@
+.codex/
+**/__pycache__/
+*.pyc
+new_kg/.env

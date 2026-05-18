@@ -1,0 +1,86 @@
+{
+  "total_cases": 6057,
+  "cases_with_review_flags": 6,
+  "features": [
+    {
+      "feature": "single_plaintiff",
+      "count": 5555,
+      "ratio_pct": 91.7121
+    },
+    {
+      "feature": "multiple_plaintiffs",
+      "count": 502,
+      "ratio_pct": 8.2879
+    },
+    {
+      "feature": "single_defendant",
+      "count": 5016,
+      "ratio_pct": 82.8133
+    },
+    {
+      "feature": "multiple_defendants",
+      "count": 1041,
+      "ratio_pct": 17.1867
+    },
+    {
+      "feature": "negligence",
+      "count": 6057,
+      "ratio_pct": 100.0
+    },
+    {
+      "feature": "gross_negligence",
+      "count": 1011,
+      "ratio_pct": 16.6914
+    },
+    {
+      "feature": "joint_liability",
+      "count": 1158,
+      "ratio_pct": 19.1184
+    },
+    {
+      "feature": "prior_criminal",
+      "count": 601,
+      "ratio_pct": 9.9224
+    },
+    {
+      "feature": "head_neck",
+      "count": 3093,
+      "ratio_pct": 51.0649
+    },
+    {
+      "feature": "trunk",
+      "count": 1910,
+      "ratio_pct": 31.5338
+    },
+    {
+      "feature": "extremities",
+      "count": 4777,
+      "ratio_pct": 78.8674
+    },
+    {
+      "feature": "psych_other",
+      "count": 6056,
+      "ratio_pct": 99.9835
+    },
+    {
+      "feature": "medical_rehab",
+      "count": 5093,
+      "ratio_pct": 84.0845
+    },
+    {
+      "feature": "lost_income",
+      "count": 4067,
+      "ratio_pct": 67.1455
+    },
+    {
+      "feature": "non_pecuniary",
+      "count": 6046,
+      "ratio_pct": 99.8184
+    },
+    {
+      "feature": "care_other",
+      "count": 5351,
+      "ratio_pct": 88.3441
+    }
+  ]
+}

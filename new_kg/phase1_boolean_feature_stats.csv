@@ -1,0 +1,17 @@
+feature,count,ratio_pct
+single_plaintiff,5555,91.7121
+multiple_plaintiffs,502,8.2879
+single_defendant,5016,82.8133
+multiple_defendants,1041,17.1867
+negligence,6057,100.0
+gross_negligence,1011,16.6914
+joint_liability,1158,19.1184
+prior_criminal,601,9.9224
+head_neck,3093,51.0649
+trunk,1910,31.5338
+extremities,4777,78.8674
+psych_other,6056,99.9835
+medical_rehab,5093,84.0845
+lost_income,4067,67.1455
+non_pecuniary,6046,99.8184
+care_other,5351,88.3441

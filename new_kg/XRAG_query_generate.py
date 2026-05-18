@@ -1,0 +1,1170 @@
+from __future__ import annotations
+
+"""
+XRAG query generation pipeline
+
+Architecture:
+1. Query loading / corpus loading
+2. Query feature extraction and XRAG retrieval
+3. Legal-generation support rules and prompts
+4. Section-wise lawsuit generation
+5. Batch export for experiment evaluation
+
+The legal extraction rules and strict prompt templates are intentionally
+kept in `xrag_generation_legal.py` so this file remains the orchestration
+layer for the 50-query experiment pipeline.
+"""
+
+import argparse
+import json
+import csv
+import re
+from dataclasses import dataclass
+from itertools import permutations
+from pathlib import Path
+from typing import Iterable
+
+import numpy as np
+import requests
+from openpyxl import load_workbook
+
+from xrag_generation_legal import (
+    build_strict_facts_prompt,
+    determine_applicable_laws_structured,
+    extract_parties_structured,
+)
+from xrag_generation_sections import (
+    build_conclusion_section,
+    build_damages_prompt,
+    build_generation_support_context,
+    clean_damage_section,
+    extract_damage_constraints,
+)
+
+
+BASE_DIR = Path(__file__).resolve().parent
+QUERY_FILE = Path("/home/aru/AI_LAW/測試用50筆_0512.xlsx")
+CASE_FILE = BASE_DIR / "phase1_boolean_severity_v1.jsonl"
+LINKS_FILE = BASE_DIR / "experiment_outputs" / "experiment_links.csv"
+OUTPUT_DIR = BASE_DIR / "generation_outputs"
+LLM_URL = "http://localhost:11434/api/generate"
+DEFAULT_MODEL = "gemma3:27b"
+
+WEIGHT_PERMUTATIONS = sorted(set(permutations((0.5, 0.3, 0.2), 3)), reverse=True)
+DISTANCE_THRESHOLDS = [0.075, 0.100, 0.125]
+LITIGANT_DISTANCE_WEIGHT = 0.1
+
+GROSS_NEG_PATTERNS = [
+    r"酒[後醉]駕",
+    r"吐氣酒精濃度",
+    r"無照",
+    r"駕照.*吊銷",
+    r"闖紅燈",
+    r"逆向",
+    r"超速",
+    r"兩段式左轉",
+    r"未依.*閃光紅燈",
+    r"明知.*仍",
+]
+JOINT_LIABILITY_PATTERNS = [
+    r"連帶",
+    r"共同不法侵害",
+    r"共同侵權",
+    r"民法第\s*18[78]\s*條",
+    r"第\s*18[78]\s*條",
+    r"法定代理人",
+    r"僱用人",
+    r"與其法定代理人連帶",
+]
+PRIOR_CRIMINAL_PATTERNS = [
+    r"前科",
+    r"刑事",
+    r"緩起訴",
+    r"有期徒刑",
+    r"拘役",
+    r"酒駕案件",
+    r"吊銷.*駕照",
+    r"遭註銷",
+    r"刑案",
+]
+HEAD_NECK_PATTERNS = [r"頭", r"頭暈", r"頭痛", r"顱", r"腦", r"頸", r"頸椎", r"顏面", r"面部", r"臉部"]
+TRUNK_PATTERNS = [r"胸", r"腹", r"腰", r"下背", r"背部", r"脊椎", r"骨盆", r"軀幹"]
+EXTREMITY_PATTERNS = [
+    r"肩", r"上肢", r"下肢", r"手", r"腕", r"手肘", r"手臂", r"前臂", r"腿", r"膝", r"膝蓋", r"踝", r"腳", r"足",
+    r"四肢", r"鎖骨", r"橈骨", r"韌帶",
+]
+PSYCH_PATTERNS = [r"精神", r"憂鬱", r"失眠", r"安眠藥", r"抗憂鬱", r"精神科", r"輕生", r"創傷後", r"PTSD", r"心理"]
+MEDICAL_REHAB_PATTERNS = [r"醫療費", r"醫藥費", r"診療費", r"復健", r"門診", r"急診", r"藥品", r"醫療用品", r"護具", r"醫材", r"住院"]
+LOST_INCOME_PATTERNS = [r"薪資損失", r"工作損失", r"不能工作", r"無法工作", r"減少勞動能力", r"勞動能力", r"收入減少", r"請假", r"失去工作"]
+NON_PECUNIARY_PATTERNS = [r"慰撫金", r"精神慰撫金", r"非財產上"]
+CARE_OTHER_PATTERNS = [r"看護費", r"交通費", r"計程車", r"車輛", r"修理費", r"修復費", r"安全帽", r"營養品", r"照護", r"看護", r"護理"]
+
+A_FACT_PATTERNS = [r"酒[後醉]駕", r"吐氣酒精濃度", r"無照", r"駕照.*吊銷", r"駕照.*註銷"]
+B_FACT_PATTERNS = [r"闖紅燈", r"逆向", r"超速", r"肇事逃逸", r"兩段式左轉", r"未依.*燈號"]
+C_FACT_PATTERNS = [r"未保持安全距離", r"追撞", r"未讓直行車", r"轉彎未讓", r"未禮讓", r"連帶", r"共同侵權", r"法定代理人", r"僱用人"]
+E_FACT_PATTERNS = [r"閃避不及", r"猝不及防"]
+A_INJURY_PATTERNS = [r"植物人", r"截肢", r"全身癱瘓", r"無法脫離呼吸器"]
+B_INJURY_PATTERNS = [r"顱內出血", r"硬腦膜", r"脊椎骨折", r"脊髓", r"失明", r"癱瘓", r"需專人.*看護", r"長期看護", r"顱骨缺損"]
+C_INJURY_PATTERNS = [r"骨折", r"鋼釘", r"住院", r"手術", r"開刀", r"粉碎性", r"韌帶撕裂"]
+D_INJURY_PATTERNS = [r"挫傷", r"腦震盪", r"復健", r"拉傷", r"扭傷", r"骨裂"]
+E_INJURY_PATTERNS = [r"擦傷", r"破皮", r"瘀青", r"瘀傷", r"擦挫傷"]
+INSURANCE_DED_PATTERNS = [r"強制險", r"已獲賠償", r"已領.*保險", r"保險公司", r"扣除"]
+TOTAL_AMOUNT_PATTERNS = [r"(?:合計|總計|共計|請求(?:被告)?(?:給付|賠償)?|賠償(?:金額)?(?:總計)?)\s*([0-9,]+)\s*元"]
+
+FACT_SCORE = {"A": 1.0, "B": 0.8, "C": 0.6, "D": 0.4, "E": 0.2, "N": 0.0}
+INJURY_SCORE = {"A": 1.0, "B": 0.8, "C": 0.6, "D": 0.4, "E": 0.2, "N": 0.0}
+COMP_SCORE = {"A": 1.0, "B": 0.75, "C": 0.5, "D": 0.25, "N": 0.0}
+INSURANCE_DEDUCTION_PENALTY = 0.2
+
+TAU_CODE_BY_VALUE = {
+    0.075: "L",
+    0.100: "M",
+    0.125: "H",
+}
+
+WEIGHT_CODE_BY_VALUES = {
+    (0.5, 0.3, 0.2): "FI",
+    (0.5, 0.2, 0.3): "FC",
+    (0.3, 0.5, 0.2): "IF",
+    (0.3, 0.2, 0.5): "CF",
+    (0.2, 0.5, 0.3): "IC",
+    (0.2, 0.3, 0.5): "CI",
+}
+
+
+@dataclass
+class ExperimentTreeContext:
+    exp_id: str
+    heavy_parent_map: dict[str, str]
+    heavy_child_map: dict[str, list[str]]
+    light_parent_map: dict[str, str]
+    light_child_map: dict[str, list[str]]
+
+
+EXPERIMENT_TREE_CACHE: dict[str, ExperimentTreeContext] = {}
+
+
+def compile_any(patterns: list[str]) -> re.Pattern[str]:
+    return re.compile("|".join(f"(?:{p})" for p in patterns))
+
+
+GROSS_NEG_RE = compile_any(GROSS_NEG_PATTERNS)
+JOINT_LIABILITY_RE = compile_any(JOINT_LIABILITY_PATTERNS)
+PRIOR_CRIMINAL_RE = compile_any(PRIOR_CRIMINAL_PATTERNS)
+HEAD_NECK_RE = compile_any(HEAD_NECK_PATTERNS)
+TRUNK_RE = compile_any(TRUNK_PATTERNS)
+EXTREMITY_RE = compile_any(EXTREMITY_PATTERNS)
+PSYCH_RE = compile_any(PSYCH_PATTERNS)
+MEDICAL_REHAB_RE = compile_any(MEDICAL_REHAB_PATTERNS)
+LOST_INCOME_RE = compile_any(LOST_INCOME_PATTERNS)
+NON_PECUNIARY_RE = compile_any(NON_PECUNIARY_PATTERNS)
+CARE_OTHER_RE = compile_any(CARE_OTHER_PATTERNS)
+
+A_FACT_RE = compile_any(A_FACT_PATTERNS)
+B_FACT_RE = compile_any(B_FACT_PATTERNS)
+C_FACT_RE = compile_any(C_FACT_PATTERNS)
+E_FACT_RE = compile_any(E_FACT_PATTERNS)
+A_INJURY_RE = compile_any(A_INJURY_PATTERNS)
+B_INJURY_RE = compile_any(B_INJURY_PATTERNS)
+C_INJURY_RE = compile_any(C_INJURY_PATTERNS)
+D_INJURY_RE = compile_any(D_INJURY_PATTERNS)
+E_INJURY_RE = compile_any(E_INJURY_PATTERNS)
+INSURANCE_DED_RE = compile_any(INSURANCE_DED_PATTERNS)
+
+
+def iter_records(path: Path) -> Iterable[dict]:
+    with path.open(encoding="utf-8") as fh:
+        for line in fh:
+            line = line.strip()
+            if line:
+                yield json.loads(line)
+
+
+def load_case_corpus() -> tuple[list[dict], np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+    rows = []
+    litigant_values = []
+    fact_values = []
+    injury_values = []
+    comp_values = []
+    case_sort = []
+    for rec in iter_records(CASE_FILE):
+        rows.append(rec)
+        litigants = rec["boolean_matrix"]["litigants"]
+        litigant_values.append([
+            float(litigants.get("single_plaintiff", 0)),
+            float(litigants.get("multiple_plaintiffs", 0)),
+            float(litigants.get("single_defendant", 0)),
+            float(litigants.get("multiple_defendants", 0)),
+        ])
+        scores = rec["severity_scores"]
+        fact_values.append(float(scores["Fact"]))
+        injury_values.append(float(scores["Injury"]))
+        comp_values.append(float(scores["Compensation"]))
+        cid = str(rec["case_id"])
+        case_sort.append(int(cid) if cid.isdigit() else 10**12 + len(case_sort))
+    return (
+        rows,
+        np.array(litigant_values, dtype=np.float32),
+        np.array(fact_values, dtype=np.float32),
+        np.array(injury_values, dtype=np.float32),
+        np.array(comp_values, dtype=np.float32),
+        np.array(case_sort, dtype=np.int64),
+    )
+
+
+def load_parent_map(exp_id: str) -> dict[str, str]:
+    parent_map: dict[str, str] = {}
+    if not LINKS_FILE.exists():
+        return parent_map
+    with LINKS_FILE.open("r", encoding="utf-8", newline="") as f:
+        reader = csv.DictReader(f)
+        for row in reader:
+            if row["exp_id"] == exp_id and row["link_type"] == "parent":
+                parent_map[str(row["target_case_id"])] = str(row["source_case_id"])
+    return parent_map
+
+
+def build_child_map(parent_map: dict[str, str]) -> dict[str, list[str]]:
+    child_map: dict[str, list[str]] = {}
+    for child_id, parent_id in parent_map.items():
+        child_map.setdefault(parent_id, []).append(child_id)
+    return child_map
+
+
+def compute_reverse_parent_map(
+    exp: dict,
+    case_ids: list[str],
+    case_sort: np.ndarray,
+    litigant_values: np.ndarray,
+    fact_values: np.ndarray,
+    injury_values: np.ndarray,
+    comp_values: np.ndarray,
+) -> dict[str, str]:
+    fact_w = np.float32(exp["fact_w"])
+    injury_w = np.float32(exp["injury_w"])
+    comp_w = np.float32(exp["comp_w"])
+    tau = np.float32(exp["distance_threshold"])
+
+    scores = fact_w * fact_values + injury_w * injury_values + comp_w * comp_values
+    litigant_distance_matrix = LITIGANT_DISTANCE_WEIGHT * np.abs(
+        litigant_values[:, None, :] - litigant_values[None, :, :]
+    ).mean(axis=2)
+    distance_matrix = (
+        fact_w * np.abs(fact_values[:, None] - fact_values[None, :])
+        + injury_w * np.abs(injury_values[:, None] - injury_values[None, :])
+        + comp_w * np.abs(comp_values[:, None] - comp_values[None, :])
+        + litigant_distance_matrix
+    ).astype(np.float32)
+    np.fill_diagonal(distance_matrix, np.float32(np.inf))
+
+    reverse_parent_map: dict[str, str] = {}
+    root_idx = int(np.argmin(scores))
+    for i, cid in enumerate(case_ids):
+        if i == root_idx:
+            continue
+        drow = distance_matrix[i]
+        candidate_idx = np.where((scores < scores[i]) & (drow <= tau))[0]
+        if candidate_idx.size == 0:
+            continue
+        ordered_idx = candidate_idx[
+            np.lexsort(
+                (
+                    case_sort[candidate_idx],
+                    scores[candidate_idx],
+                    drow[candidate_idx],
+                )
+            )
+        ]
+        parent_idx = int(ordered_idx[0])
+        reverse_parent_map[cid] = case_ids[parent_idx]
+
+    return reverse_parent_map
+
+
+def get_experiment_tree_context(
+    exp: dict,
+    case_ids: list[str],
+    case_sort: np.ndarray,
+    litigant_values: np.ndarray,
+    fact_values: np.ndarray,
+    injury_values: np.ndarray,
+    comp_values: np.ndarray,
+) -> ExperimentTreeContext:
+    exp_id = exp["exp_id"]
+    cached = EXPERIMENT_TREE_CACHE.get(exp_id)
+    if cached is not None:
+        return cached
+
+    heavy_parent_map = load_parent_map(exp_id)
+    light_parent_map = compute_reverse_parent_map(
+        exp,
+        case_ids,
+        case_sort,
+        litigant_values,
+        fact_values,
+        injury_values,
+        comp_values,
+    )
+    context = ExperimentTreeContext(
+        exp_id=exp_id,
+        heavy_parent_map=heavy_parent_map,
+        heavy_child_map=build_child_map(heavy_parent_map),
+        light_parent_map=light_parent_map,
+        light_child_map=build_child_map(light_parent_map),
+    )
+    EXPERIMENT_TREE_CACHE[exp_id] = context
+    return context
+
+
+def load_queries(path: Path) -> list[dict]:
+    wb = load_workbook(path, read_only=True, data_only=True)
+    ws = wb.active
+    rows = ws.iter_rows(values_only=True)
+    header = next(rows)
+    idx = {name: header.index(name) for name in header}
+    items = []
+    current_category = ""
+    for row in rows:
+        query_id = row[idx["query_id"]]
+        query_text = row[idx["模擬輸入內容"]]
+        if not query_id or not query_text:
+            continue
+        raw_category = row[idx["類別"]]
+        if raw_category not in (None, ""):
+            current_category = str(raw_category)
+        items.append({
+            "category": current_category,
+            "query_id": int(query_id),
+            "query_text": str(query_text),
+            "reference_text": str(row[idx["Ground Truth-gpt-4o-mini"]] or ""),
+        })
+    return items
+
+
+def extract_sections(text: str) -> dict[str, str]:
+    result = {"accident_facts": "", "injuries": "", "compensation_facts": ""}
+    fact_match = re.search(r"一[、．.\s]*事故發生緣由[:：]?\s*(.*?)(?=二[、．.]|$)", text, re.S)
+    injury_match = re.search(r"二[、．.\s]*(?:原告)?受傷情形[:：]?\s*(.*?)(?=三[、．.]|$)", text, re.S)
+    comp_match = re.search(r"三[、．.\s]*請求賠償的事實根據[:：]?\s*(.*?)$", text, re.S)
+    if fact_match:
+        result["accident_facts"] = fact_match.group(1).strip()
+    if injury_match:
+        result["injuries"] = injury_match.group(1).strip()
+    if comp_match:
+        result["compensation_facts"] = comp_match.group(1).strip()
+    return result
+
+
+def extract_parties(query_text: str, model: str = DEFAULT_MODEL) -> dict:
+    return extract_parties_structured(query_text, LLM_URL, model)
+
+
+def has_match(regex: re.Pattern[str], text: str) -> int:
+    return 1 if text and regex.search(text) else 0
+
+
+def build_query_boolean_matrix(query_text: str, category: str) -> dict:
+    sections = extract_sections(query_text)
+    full_text = "\n".join(v for v in [query_text, sections["accident_facts"], sections["injuries"], sections["compensation_facts"]] if v)
+    litigants = {
+        "single_plaintiff": 1,
+        "multiple_plaintiffs": 0,
+        "single_defendant": 1,
+        "multiple_defendants": 0,
+    }
+    if "原被告皆數名" in category:
+        litigants = {"single_plaintiff": 0, "multiple_plaintiffs": 1, "single_defendant": 0, "multiple_defendants": 1}
+    elif "數名原告" in category:
+        litigants = {"single_plaintiff": 0, "multiple_plaintiffs": 1, "single_defendant": 1, "multiple_defendants": 0}
+    elif "數名被告" in category:
+        litigants = {"single_plaintiff": 1, "multiple_plaintiffs": 0, "single_defendant": 0, "multiple_defendants": 1}
+
+    return {
+        "litigants": litigants,
+        "fact": {
+            "negligence": 1,
+            "gross_negligence": has_match(GROSS_NEG_RE, full_text),
+            "joint_liability": 1 if ("§187" in category or "§188" in category or "§190" in category or JOINT_LIABILITY_RE.search(full_text)) else 0,
+            "prior_criminal": has_match(PRIOR_CRIMINAL_RE, full_text),
+        },
+        "injury": {
+            "head_neck": has_match(HEAD_NECK_RE, sections["injuries"] or full_text),
+            "trunk": has_match(TRUNK_RE, sections["injuries"] or full_text),
+            "extremities": has_match(EXTREMITY_RE, sections["injuries"] or full_text),
+            "psych_other": has_match(PSYCH_RE, full_text),
+        },
+        "compensation": {
+            "medical_rehab": has_match(MEDICAL_REHAB_RE, sections["compensation_facts"] or full_text),
+            "lost_income": has_match(LOST_INCOME_RE, sections["compensation_facts"] or full_text),
+            "non_pecuniary": has_match(NON_PECUNIARY_RE, sections["compensation_facts"] or full_text),
+            "care_other": has_match(CARE_OTHER_RE, sections["compensation_facts"] or full_text),
+        },
+    }
+
+
+def extract_total_amount(text: str) -> int:
+    amounts: list[int] = []
+    for pattern in TOTAL_AMOUNT_PATTERNS:
+        for match in re.finditer(pattern, text):
+            raw = match.group(1).replace(",", "")
+            try:
+                amounts.append(int(raw))
+            except ValueError:
+                continue
+    if amounts:
+        return max(amounts)
+    fallback = []
+    for match in re.finditer(r"([0-9][0-9,]{3,})\s*元", text):
+        raw = match.group(1).replace(",", "")
+        try:
+            fallback.append(int(raw))
+        except ValueError:
+            continue
+    return max(fallback) if fallback else 0
+
+
+def amount_to_comp_level(amount: int) -> str:
+    if amount > 2_500_000:
+        return "A"
+    if amount > 1_000_000:
+        return "B"
+    if amount > 300_000:
+        return "C"
+    if amount > 0:
+        return "D"
+    return "N"
+
+
+def classify_query_levels(query_text: str, boolean_matrix: dict) -> tuple[dict, dict]:
+    sections = extract_sections(query_text)
+    fact_text = sections["accident_facts"] or query_text
+    injury_text = sections["injuries"] or query_text
+    comp_text = "\n".join(v for v in [sections["compensation_facts"], query_text] if v)
+    fact_flags = boolean_matrix["fact"]
+    injury_flags = boolean_matrix["injury"]
+    comp_flags = boolean_matrix["compensation"]
+
+    if fact_flags.get("gross_negligence") and A_FACT_RE.search(fact_text):
+        fact_level = "A"
+    elif fact_flags.get("gross_negligence"):
+        fact_level = "B"
+    elif fact_flags.get("joint_liability") or C_FACT_RE.search(fact_text):
+        fact_level = "C"
+    elif fact_flags.get("negligence"):
+        fact_level = "D"
+    elif E_FACT_RE.search(fact_text):
+        fact_level = "E"
+    else:
+        fact_level = "N"
+
+    if A_INJURY_RE.search(injury_text):
+        injury_level = "A"
+    elif B_INJURY_RE.search(injury_text):
+        injury_level = "B"
+    elif C_INJURY_RE.search(injury_text):
+        injury_level = "C"
+    elif D_INJURY_RE.search(injury_text):
+        injury_level = "D"
+    elif E_INJURY_RE.search(injury_text):
+        injury_level = "E"
+    elif injury_flags.get("head_neck") or injury_flags.get("trunk") or injury_flags.get("extremities"):
+        injury_level = "D"
+    elif injury_flags.get("psych_other"):
+        injury_level = "E"
+    else:
+        injury_level = "N"
+
+    total_amount = extract_total_amount(comp_text)
+    comp_level = amount_to_comp_level(total_amount)
+    if comp_level == "N" and any(comp_flags.get(k, 0) for k in ["medical_rehab", "lost_income", "non_pecuniary", "care_other"]):
+        comp_level = "D"
+    has_deduction = bool(INSURANCE_DED_RE.search(comp_text))
+    base_comp = COMP_SCORE[comp_level]
+    final_comp = base_comp - INSURANCE_DEDUCTION_PENALTY if has_deduction else base_comp
+
+    return (
+        {"Fact": fact_level, "Injury": injury_level, "Compensation": comp_level},
+        {"Fact": FACT_SCORE[fact_level], "Injury": INJURY_SCORE[injury_level], "Compensation": final_comp},
+    )
+
+
+def build_experiments() -> list[dict]:
+    experiments = []
+    exp_num = 1
+    for threshold in DISTANCE_THRESHOLDS:
+        tau_code = TAU_CODE_BY_VALUE[float(threshold)]
+        for fact_w, injury_w, comp_w in WEIGHT_PERMUTATIONS:
+            weight_code = WEIGHT_CODE_BY_VALUES[(float(fact_w), float(injury_w), float(comp_w))]
+            experiments.append({
+                "exp_id": f"E{exp_num:02d}",
+                "fact_w": float(fact_w),
+                "injury_w": float(injury_w),
+                "comp_w": float(comp_w),
+                "distance_threshold": float(threshold),
+                "weight_code": weight_code,
+                "tau_code": tau_code,
+                "short_name": f"{weight_code}-{tau_code}",
+            })
+            exp_num += 1
+    return experiments
+
+
+def retrieve_similar_cases(query_row: dict, exp: dict, corpus_rows: list[dict], litigant_values: np.ndarray, fact_values: np.ndarray, injury_values: np.ndarray, comp_values: np.ndarray, case_sort: np.ndarray, top_k: int) -> list[dict]:
+    boolean_matrix = build_query_boolean_matrix(query_row["query_text"], query_row["category"])
+    _, query_scores = classify_query_levels(query_row["query_text"], boolean_matrix)
+    q_litigants = np.array([
+        float(boolean_matrix["litigants"]["single_plaintiff"]),
+        float(boolean_matrix["litigants"]["multiple_plaintiffs"]),
+        float(boolean_matrix["litigants"]["single_defendant"]),
+        float(boolean_matrix["litigants"]["multiple_defendants"]),
+    ], dtype=np.float32)
+
+    fact_w = np.float32(exp["fact_w"])
+    injury_w = np.float32(exp["injury_w"])
+    comp_w = np.float32(exp["comp_w"])
+    tau = np.float32(exp["distance_threshold"])
+    q_fact = np.float32(query_scores["Fact"])
+    q_injury = np.float32(query_scores["Injury"])
+    q_comp = np.float32(query_scores["Compensation"])
+    q_score = float(fact_w * q_fact + injury_w * q_injury + comp_w * q_comp)
+
+    distances = (
+        fact_w * np.abs(fact_values - q_fact)
+        + injury_w * np.abs(injury_values - q_injury)
+        + comp_w * np.abs(comp_values - q_comp)
+        + LITIGANT_DISTANCE_WEIGHT * np.abs(litigant_values - q_litigants).mean(axis=1)
+    ).astype(np.float32)
+
+    candidate_idx = np.where(distances <= tau)[0]
+    if candidate_idx.size < top_k:
+        candidate_idx = np.arange(len(corpus_rows))
+    ordered_idx = candidate_idx[np.lexsort((case_sort[candidate_idx], -(
+        fact_w * fact_values[candidate_idx] + injury_w * injury_values[candidate_idx] + comp_w * comp_values[candidate_idx]
+    ), distances[candidate_idx]))][:top_k]
+
+    result = []
+    for rank, idx in enumerate(ordered_idx, start=1):
+        rec = corpus_rows[int(idx)]
+        case_score = float(fact_w * fact_values[idx] + injury_w * injury_values[idx] + comp_w * comp_values[idx])
+        result.append({
+            "rank": rank,
+            "case_id": str(rec["case_id"]),
+            "distance": float(distances[idx]),
+            "case_score": case_score,
+            "query_score": q_score,
+            "fact_value": float(rec["severity_scores"]["Fact"]),
+            "injury_value": float(rec["severity_scores"]["Injury"]),
+            "comp_value": float(rec["severity_scores"]["Compensation"]),
+            "fact_text": rec.get("LI_fact") or rec.get("fact_text") or "",
+            "injury_text": rec.get("LI_injury") or "",
+            "comp_text": rec.get("LI_compensation") or rec.get("compensation_text") or "",
+            "conclusion_text": rec.get("conclusion_text") or "",
+        })
+    return result
+
+
+def retrieve_dual_tree_cases(
+    query_row: dict,
+    exp: dict,
+    corpus_rows: list[dict],
+    litigant_values: np.ndarray,
+    fact_values: np.ndarray,
+    injury_values: np.ndarray,
+    comp_values: np.ndarray,
+    case_sort: np.ndarray,
+    top_k: int,
+    tree_context: ExperimentTreeContext,
+    case_idx_by_id: dict[str, int],
+) -> tuple[list[dict], dict]:
+    boolean_matrix = build_query_boolean_matrix(query_row["query_text"], query_row["category"])
+    _, query_scores = classify_query_levels(query_row["query_text"], boolean_matrix)
+    q_litigants = np.array([
+        float(boolean_matrix["litigants"]["single_plaintiff"]),
+        float(boolean_matrix["litigants"]["multiple_plaintiffs"]),
+        float(boolean_matrix["litigants"]["single_defendant"]),
+        float(boolean_matrix["litigants"]["multiple_defendants"]),
+    ], dtype=np.float32)
+
+    fact_w = np.float32(exp["fact_w"])
+    injury_w = np.float32(exp["injury_w"])
+    comp_w = np.float32(exp["comp_w"])
+    q_fact = np.float32(query_scores["Fact"])
+    q_injury = np.float32(query_scores["Injury"])
+    q_comp = np.float32(query_scores["Compensation"])
+    q_score = float(fact_w * q_fact + injury_w * q_injury + comp_w * q_comp)
+
+    distances = (
+        fact_w * np.abs(fact_values - q_fact)
+        + injury_w * np.abs(injury_values - q_injury)
+        + comp_w * np.abs(comp_values - q_comp)
+        + LITIGANT_DISTANCE_WEIGHT * np.abs(litigant_values - q_litigants).mean(axis=1)
+    ).astype(np.float32)
+    case_scores = (fact_w * fact_values + injury_w * injury_values + comp_w * comp_values).astype(np.float32)
+    ordered_global_idx = np.lexsort((case_sort, case_scores * 0 - case_scores, distances))
+    anchor_idx = int(ordered_global_idx[0])
+    anchor_case_id = str(corpus_rows[anchor_idx]["case_id"])
+
+    lighter_target = top_k // 2
+    heavier_target = top_k - lighter_target
+
+    lighter_case_ids = collect_descendant_cases(
+        anchor_case_id,
+        tree_context.heavy_child_map,
+        lighter_target,
+        distances,
+        case_idx_by_id,
+    )
+    heavier_case_ids = collect_descendant_cases(
+        anchor_case_id,
+        tree_context.light_child_map,
+        heavier_target,
+        distances,
+        case_idx_by_id,
+    )
+
+    selected_case_ids: list[tuple[str, str]] = []
+    seen = {anchor_case_id}
+    for cid in lighter_case_ids:
+        if cid not in seen:
+            selected_case_ids.append((cid, "lighter_tree"))
+            seen.add(cid)
+    for cid in heavier_case_ids:
+        if cid not in seen:
+            selected_case_ids.append((cid, "heavier_tree"))
+            seen.add(cid)
+
+    for idx in ordered_global_idx[1:]:
+        cid = str(corpus_rows[int(idx)]["case_id"])
+        if cid in seen:
+            continue
+        selected_case_ids.append((cid, "fallback"))
+        seen.add(cid)
+        if len(selected_case_ids) >= top_k:
+            break
+
+    ranked_results = []
+    for rank, (cid, source_side) in enumerate(selected_case_ids[:top_k], start=1):
+        rec = corpus_rows[case_idx_by_id[cid]]
+        idx = case_idx_by_id[cid]
+        ranked_results.append({
+            "rank": rank,
+            "case_id": cid,
+            "distance": float(distances[idx]),
+            "case_score": float(case_scores[idx]),
+            "query_score": q_score,
+            "fact_value": float(rec["severity_scores"]["Fact"]),
+            "injury_value": float(rec["severity_scores"]["Injury"]),
+            "comp_value": float(rec["severity_scores"]["Compensation"]),
+            "fact_text": rec.get("LI_fact") or rec.get("fact_text") or "",
+            "injury_text": rec.get("LI_injury") or "",
+            "comp_text": rec.get("LI_compensation") or rec.get("compensation_text") or "",
+            "conclusion_text": rec.get("conclusion_text") or "",
+            "retrieval_side": source_side,
+            "anchor_case_id": anchor_case_id,
+        })
+    metadata = {
+        "anchor_case_id": anchor_case_id,
+        "anchor_distance": float(distances[anchor_idx]),
+        "anchor_score": float(case_scores[anchor_idx]),
+        "lighter_candidates": lighter_case_ids,
+        "heavier_candidates": heavier_case_ids,
+    }
+    return ranked_results, metadata
+
+
+def collect_descendant_cases(
+    anchor_case_id: str,
+    child_map: dict[str, list[str]],
+    limit: int,
+    distances: np.ndarray,
+    case_idx_by_id: dict[str, int],
+) -> list[str]:
+    if limit <= 0:
+        return []
+    results: list[str] = []
+    visited = set()
+    current_level = list(child_map.get(anchor_case_id, []))
+    while current_level and len(results) < limit:
+        ordered_level = sorted(
+            [cid for cid in current_level if cid not in visited],
+            key=lambda cid: distances[case_idx_by_id[cid]],
+        )
+        next_level: list[str] = []
+        for cid in ordered_level:
+            if cid in visited:
+                continue
+            visited.add(cid)
+            results.append(cid)
+            if len(results) >= limit:
+                break
+            next_level.extend(child_map.get(cid, []))
+        current_level = next_level
+    return results
+
+
+def determine_applicable_laws(accident_facts: str, injuries: str, comp_facts: str, parties: dict) -> list[str]:
+    return determine_applicable_laws_structured(accident_facts, injuries, comp_facts, parties)
+
+
+def law_descriptions() -> dict[str, str]:
+    return {
+        "民法第184條第1項前段": "因故意或過失，不法侵害他人之權利者，負損害賠償責任。",
+        "民法第185條第1項": "數人共同不法侵害他人之權利者，連帶負損害賠償責任。",
+        "民法第187條第1項": "無行為能力人或限制行為能力人，不法侵害他人之權利者，以行為時有識別能力為限，與其法定代理人連帶負損害賠償責任。",
+        "民法第188條第1項本文": "受僱人因執行職務，不法侵害他人之權利者，由僱用人與行為人連帶負損害賠償責任。",
+        "民法第190條第1項": "動物加損害於他人者，由其占有人負損害賠償責任。",
+        "民法第191條之2": "汽車、機車或其他非依軌道行駛之動力車輛，在使用中加損害於他人者，駕駛人應賠償因此所生之損害。",
+        "民法第193條第1項": "不法侵害他人之身體或健康者，對於被害人因此喪失或減少勞動能力或增加生活上之需要時，應負損害賠償責任。",
+        "民法第195條第1項前段": "不法侵害他人之身體、健康、名譽、自由、信用、隱私、貞操，或不法侵害其他人格法益而情節重大者，被害人雖非財產上之損害，亦得請求賠償相當之金額。",
+    }
+
+
+def build_reasoning_context(similar_cases: list[dict], corpus_by_id: dict[str, dict], parent_map: dict[str, str]) -> str:
+    blocks = []
+    for case in similar_cases:
+        parent_id = parent_map.get(case["case_id"])
+        parent_summary = ""
+        if parent_id and parent_id in corpus_by_id:
+            parent_rec = corpus_by_id[parent_id]
+            parent_summary = (
+                f"上位父案例 {parent_id}："
+                f"F={parent_rec['severity_scores']['Fact']}, "
+                f"I={parent_rec['severity_scores']['Injury']}, "
+                f"C={parent_rec['severity_scores']['Compensation']}；"
+                f"結論摘要={parent_rec.get('conclusion_text','')[:120]}"
+            )
+        blocks.append(
+            f"案例 {case['case_id']}（distance={case['distance']:.4f}, score={case['case_score']:.4f}）"
+            f"\n- 事故：{case['fact_text'][:240]}"
+            f"\n- 受傷：{case['injury_text'][:180]}"
+            f"\n- 賠償：{case['comp_text'][:240]}"
+            + (f"\n- 圖譜推理：{parent_summary}" if parent_summary else "")
+        )
+    return "\n\n".join(blocks)
+
+
+def call_llm(prompt: str, model: str, timeout: int = 180) -> str:
+    response = requests.post(
+        LLM_URL,
+        json={"model": model, "prompt": prompt, "stream": False},
+        timeout=timeout,
+    )
+    response.raise_for_status()
+    return response.json()["response"].strip()
+
+
+def generate_standard_facts(accident_facts: str, model: str) -> str:
+    prompt = build_strict_facts_prompt(accident_facts)
+    result = call_llm(prompt, model)
+    result = re.sub(r"^一、\s*\n+\s*", "一、", result.strip())
+    m = re.search(r"一、\s*(.*)", result, re.S)
+    if m:
+        body = m.group(1).strip()
+        body = re.sub(r"^緣\s*\n+\s*", "緣", body)
+        return f"一、{body}"
+    text = re.sub(r'^一[、．.\s]*事故發生緣由[:：]?\s*', '', accident_facts.strip())
+    return f"一、緣{text}"
+
+
+def generate_standard_laws(accident_facts: str, injuries: str, comp_facts: str, parties: dict) -> str:
+    laws = determine_applicable_laws(accident_facts, injuries, comp_facts, parties)
+    desc = law_descriptions()
+    law_texts = [f"「{desc[law]}」" for law in laws if law in desc]
+    joined = "、".join(law_texts)
+    joined_articles = "、".join(laws)
+    return f"二、按{joined}，{joined_articles}分別定有明文。查被告因上開侵權行為，致原告受有下列損害，依前揭規定，被告應負損害賠償責任："
+
+
+def generate_compensation(comp_facts: str, injuries: str, support_context: str, parties: dict, model: str) -> str:
+    constraints = extract_damage_constraints(comp_facts, injuries)
+    prompt = build_damages_prompt(comp_facts, injuries, support_context, parties, constraints)
+    result = call_llm(prompt, model, timeout=240)
+    return clean_damage_section(result, constraints)
+
+
+def generate_conclusion(accident_facts: str, comp_facts: str, damage_section: str, parties: dict, model: str) -> str:
+    return build_conclusion_section(damage_section, parties)
+
+
+def assemble_final_lawsuit(facts: str, laws: str, damages: str, conclusion: str) -> str:
+    return f"{facts}\n\n{laws}\n\n{damages}\n\n{conclusion}".strip()
+
+
+def run_generation_for_query(
+    query_row: dict,
+    exp: dict,
+    corpus_rows: list[dict],
+    litigant_values: np.ndarray,
+    fact_values: np.ndarray,
+    injury_values: np.ndarray,
+    comp_values: np.ndarray,
+    case_sort: np.ndarray,
+    corpus_by_id: dict[str, dict],
+    case_idx_by_id: dict[str, int],
+    top_k: int,
+    model: str,
+) -> dict:
+    tree_context = get_experiment_tree_context(
+        exp,
+        [str(rec["case_id"]) for rec in corpus_rows],
+        case_sort,
+        litigant_values,
+        fact_values,
+        injury_values,
+        comp_values,
+    )
+    similar_cases, retrieval_meta = retrieve_dual_tree_cases(
+        query_row,
+        exp,
+        corpus_rows,
+        litigant_values,
+        fact_values,
+        injury_values,
+        comp_values,
+        case_sort,
+        top_k,
+        tree_context,
+        case_idx_by_id,
+    )
+    sections = extract_sections(query_row["query_text"])
+    parties = extract_parties(query_row["query_text"], model)
+    reasoning_context = build_reasoning_context(similar_cases, corpus_by_id, tree_context.heavy_parent_map)
+    generation_support = build_generation_support_context(similar_cases, tree_context.heavy_parent_map, corpus_by_id)
+    facts = generate_standard_facts(sections["accident_facts"] or query_row["query_text"], model)
+    laws = generate_standard_laws(
+        sections["accident_facts"] or query_row["query_text"],
+        sections["injuries"],
+        sections["compensation_facts"],
+        parties,
+    )
+    damages = generate_compensation(
+        sections["compensation_facts"] or query_row["query_text"],
+        sections["injuries"],
+        generation_support,
+        parties,
+        model,
+    )
+    conclusion = generate_conclusion(
+        sections["accident_facts"] or query_row["query_text"],
+        sections["compensation_facts"],
+        damages,
+        parties,
+        model,
+    )
+    generated_text = assemble_final_lawsuit(facts, laws, damages, conclusion)
+    return {
+        "query_id": query_row["query_id"],
+        "category": query_row["category"],
+        "exp_id": exp["exp_id"],
+        "exp_name": exp["short_name"],
+        "weight_code": exp["weight_code"],
+        "tau_code": exp["tau_code"],
+        "fact_w": exp["fact_w"],
+        "injury_w": exp["injury_w"],
+        "comp_w": exp["comp_w"],
+        "tau": exp["distance_threshold"],
+        "top_k": top_k,
+        "model": model,
+        "parties": parties,
+        "retrieval_mode": "dual_tree",
+        "tree_exp_id": tree_context.exp_id,
+        "anchor_case_id": retrieval_meta["anchor_case_id"],
+        "anchor_distance": retrieval_meta["anchor_distance"],
+        "anchor_score": retrieval_meta["anchor_score"],
+        "lighter_candidates": retrieval_meta["lighter_candidates"],
+        "heavier_candidates": retrieval_meta["heavier_candidates"],
+        "query_text": query_row["query_text"],
+        "silver_reference_text": query_row["reference_text"],
+        "reference_text": query_row["reference_text"],
+        "similar_cases": similar_cases,
+        "parent_map": tree_context.heavy_parent_map,
+        "reverse_parent_map": tree_context.light_parent_map,
+        "reasoning_context": reasoning_context,
+        "generation_support": generation_support,
+        "facts_section": facts,
+        "laws_section": laws,
+        "damages_section": damages,
+        "conclusion_section": conclusion,
+        "generated_text": generated_text,
+    }
+
+
+def save_batch_outputs(records: list[dict], output_stem: str) -> tuple[Path, Path]:
+    OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
+    jsonl_path = OUTPUT_DIR / f"{output_stem}.jsonl"
+    csv_path = OUTPUT_DIR / f"{output_stem}.csv"
+
+    with jsonl_path.open("w", encoding="utf-8") as fh:
+        for record in records:
+            fh.write(json.dumps(record, ensure_ascii=False) + "\n")
+
+    fieldnames = [
+        "query_id",
+        "category",
+        "exp_id",
+        "exp_name",
+        "retrieval_mode",
+        "tree_exp_id",
+        "anchor_case_id",
+        "anchor_distance",
+        "anchor_score",
+        "weight_code",
+        "tau_code",
+        "fact_w",
+        "injury_w",
+        "comp_w",
+        "tau",
+        "top_k",
+        "model",
+        "query_text",
+        "silver_reference_text",
+        "facts_section",
+        "laws_section",
+        "damages_section",
+        "conclusion_section",
+        "generated_text",
+    ]
+    with csv_path.open("w", encoding="utf-8", newline="") as fh:
+        writer = csv.DictWriter(fh, fieldnames=fieldnames)
+        writer.writeheader()
+        for record in records:
+            writer.writerow({name: record.get(name, "") for name in fieldnames})
+
+    return jsonl_path, csv_path
+
+
+def output_paths_for_stem(output_stem: str) -> tuple[Path, Path]:
+    OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
+    return OUTPUT_DIR / f"{output_stem}.jsonl", OUTPUT_DIR / f"{output_stem}.csv"
+
+
+def append_record_jsonl(path: Path, record: dict) -> None:
+    with path.open("a", encoding="utf-8") as fh:
+        fh.write(json.dumps(record, ensure_ascii=False) + "\n")
+
+
+def rewrite_progress_csv(path: Path, records: list[dict]) -> None:
+    fieldnames = [
+        "query_id",
+        "category",
+        "exp_id",
+        "exp_name",
+        "retrieval_mode",
+        "tree_exp_id",
+        "anchor_case_id",
+        "anchor_distance",
+        "anchor_score",
+        "weight_code",
+        "tau_code",
+        "fact_w",
+        "injury_w",
+        "comp_w",
+        "tau",
+        "top_k",
+        "model",
+        "query_text",
+        "silver_reference_text",
+        "facts_section",
+        "laws_section",
+        "damages_section",
+        "conclusion_section",
+        "generated_text",
+        "run_status",
+        "error_message",
+    ]
+    with path.open("w", encoding="utf-8", newline="") as fh:
+        writer = csv.DictWriter(fh, fieldnames=fieldnames)
+        writer.writeheader()
+        for record in records:
+            writer.writerow({name: record.get(name, "") for name in fieldnames})
+
+
+def select_target_experiments(exp_arg: str | None) -> list[dict]:
+    experiments = build_experiments()
+    if exp_arg is None:
+        return experiments
+
+    experiments_by_id = {exp["exp_id"]: exp for exp in experiments}
+    experiments_by_name = {exp["short_name"]: exp for exp in experiments}
+    exp = experiments_by_id.get(exp_arg) or experiments_by_name.get(exp_arg)
+    if exp is None:
+        known = ", ".join(list(experiments_by_id.keys()) + list(experiments_by_name.keys()))
+        raise ValueError(f"Unknown exp_id {exp_arg}. Known values: {known}")
+    return [exp]
+
+
+def build_default_output_stem(exp: dict | None, top_k: int, all_queries: bool, all_experiments: bool, query_id: int | None) -> str:
+    if all_experiments and all_queries:
+        return f"xrag_full_18exp_50q_topk{top_k}"
+    if all_experiments:
+        return f"xrag_all_exp_query_{query_id}_topk{top_k}"
+    if all_queries and exp is not None:
+        return f"xrag_batch_{exp['short_name']}_topk{top_k}"
+    if exp is not None and query_id is not None:
+        return f"xrag_query_{query_id}_{exp['short_name']}_topk{top_k}"
+    return f"xrag_run_topk{top_k}"
+
+
+def main() -> None:
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--query-id", type=int, default=1)
+    parser.add_argument("--exp-id", default="E05")
+    parser.add_argument("--top-k", type=int, default=3)
+    parser.add_argument("--model", default=DEFAULT_MODEL)
+    parser.add_argument("--save", action="store_true")
+    parser.add_argument("--all-queries", action="store_true")
+    parser.add_argument("--all-experiments", action="store_true")
+    parser.add_argument("--output-stem", default="")
+    args = parser.parse_args()
+
+    corpus_rows, litigant_values, fact_values, injury_values, comp_values, case_sort = load_case_corpus()
+    queries = load_queries(QUERY_FILE)
+    target_experiments = select_target_experiments(None if args.all_experiments else args.exp_id)
+    corpus_by_id = {str(rec["case_id"]): rec for rec in corpus_rows}
+    case_idx_by_id = {str(rec["case_id"]): idx for idx, rec in enumerate(corpus_rows)}
+    if args.all_queries:
+        target_queries = queries
+    else:
+        query_row = next((row for row in queries if row["query_id"] == args.query_id), None)
+        if query_row is None:
+            raise ValueError(f"query_id {args.query_id} not found in {QUERY_FILE}")
+        target_queries = [query_row]
+
+    records = []
+    verbose_single_run = (len(target_experiments) == 1 and len(target_queries) == 1)
+    total_jobs = len(target_experiments) * len(target_queries)
+    job_idx = 0
+
+    output_stem = ""
+    jsonl_path = None
+    csv_path = None
+    if args.save:
+        if args.output_stem:
+            output_stem = args.output_stem
+        else:
+            exp_for_name = target_experiments[0] if len(target_experiments) == 1 else None
+            query_id_for_name = target_queries[0]["query_id"] if len(target_queries) == 1 else None
+            output_stem = build_default_output_stem(
+                exp_for_name,
+                args.top_k,
+                args.all_queries,
+                args.all_experiments,
+                query_id_for_name,
+            )
+        jsonl_path, csv_path = output_paths_for_stem(output_stem)
+        jsonl_path.write_text("", encoding="utf-8")
+        rewrite_progress_csv(csv_path, [])
+
+    for exp in target_experiments:
+        for query_row in target_queries:
+            job_idx += 1
+            print(
+                f"[{job_idx}/{total_jobs}] running query_id={query_row['query_id']} "
+                f"exp={exp['short_name']} top_k={args.top_k} model={args.model}",
+                flush=True,
+            )
+            try:
+                record = run_generation_for_query(
+                    query_row,
+                    exp,
+                    corpus_rows,
+                    litigant_values,
+                    fact_values,
+                    injury_values,
+                    comp_values,
+                    case_sort,
+                    corpus_by_id,
+                    case_idx_by_id,
+                    args.top_k,
+                    args.model,
+                )
+                record["run_status"] = "ok"
+                record["error_message"] = ""
+                print(
+                    f"[{job_idx}/{total_jobs}] done query_id={query_row['query_id']} exp={exp['short_name']}",
+                    flush=True,
+                )
+            except Exception as exc:
+                record = {
+                    "query_id": query_row["query_id"],
+                    "category": query_row["category"],
+                    "exp_id": exp["exp_id"],
+                    "exp_name": exp["short_name"],
+                    "retrieval_mode": "dual_tree",
+                    "tree_exp_id": exp["exp_id"],
+                    "anchor_case_id": "",
+                    "anchor_distance": "",
+                    "anchor_score": "",
+                    "weight_code": exp["weight_code"],
+                    "tau_code": exp["tau_code"],
+                    "fact_w": exp["fact_w"],
+                    "injury_w": exp["injury_w"],
+                    "comp_w": exp["comp_w"],
+                    "tau": exp["distance_threshold"],
+                    "top_k": args.top_k,
+                    "model": args.model,
+                    "query_text": query_row["query_text"],
+                    "silver_reference_text": query_row["reference_text"],
+                    "facts_section": "",
+                    "laws_section": "",
+                    "damages_section": "",
+                    "conclusion_section": "",
+                    "generated_text": "",
+                    "run_status": "error",
+                    "error_message": str(exc),
+                }
+                print(
+                    f"[{job_idx}/{total_jobs}] failed query_id={query_row['query_id']} exp={exp['short_name']} error={exc}",
+                    flush=True,
+                )
+
+            records.append(record)
+            if args.save and jsonl_path is not None and csv_path is not None:
+                append_record_jsonl(jsonl_path, record)
+                rewrite_progress_csv(csv_path, records)
+
+            if verbose_single_run:
+                print("=" * 100)
+                print(
+                    f"XRAG query_id={record['query_id']} exp_id={record['exp_id']} "
+                    f"exp_name={record['exp_name']} top_k={args.top_k} model={args.model}"
+                )
+                print(f"category={record['category']}")
+                print(f"parties={record['parties']}")
+                print("-" * 100)
+                print("【找到的相似案例】")
+                for case in record["similar_cases"]:
+                    print(f"#{case['rank']} case_id={case['case_id']} distance={case['distance']:.4f} score={case['case_score']:.4f}")
+                    print(f"事故事實：{case['fact_text'][:260]}")
+                    print(f"受傷情形：{case['injury_text'][:220]}")
+                    print(f"賠償依據：{case['comp_text'][:260]}")
+                    parent_id = record["parent_map"].get(case["case_id"])
+                    if parent_id:
+                        print(f"圖譜推理：parent_case_id={parent_id}")
+                    print("-" * 100)
+                print("【圖譜推理摘要】")
+                print(record["reasoning_context"])
+                print("-" * 100)
+                print("【生成段落：事實】")
+                print(record["facts_section"])
+                print("-" * 100)
+                print("【生成段落：法條】")
+                print(record["laws_section"])
+                print("-" * 100)
+                print("【生成段落：損害】")
+                print(record["damages_section"])
+                print("-" * 100)
+                print("【生成段落：結論】")
+                print(record["conclusion_section"])
+                print("-" * 100)
+                print("【生成起訴書】")
+                print(record["generated_text"])
+                print("=" * 100)
+
+    if args.save and jsonl_path is not None and csv_path is not None:
+        print(f"saved_jsonl={jsonl_path}")
+        print(f"saved_csv={csv_path}")
+
+
+if __name__ == "__main__":
+    main()

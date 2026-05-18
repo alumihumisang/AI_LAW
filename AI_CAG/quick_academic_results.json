@@ -1,0 +1,30 @@
+{
+  "experiment_type": "academic_cag_vs_rag_comparison",
+  "cag_config": {
+    "model": "gemma3:27b",
+    "method": "standard_kv_cache_cag",
+    "case_limit": 175,
+    "coverage_ratio": 0.05843071786310518,
+    "setup_time": 0.00015163421630859375,
+    "generation_time": 37.63549041748047
+  },
+  "rag_config": {
+    "coverage_ratio": 1.0,
+    "setup_time": 0.1,
+    "generation_time": 0.5001707077026367,
+    "method": "vector_database_retrieval"
+  },
+  "academic_conclusions": [
+    "CAG受硬體限制，只能使用5.8%的案例",
+    "RAG可以存取100%的案例，無硬體限制",
+    "CAG的理論優勢（所有知識在上下文）無法發揮",
+    "RAG在資源受限環境下更實用",
+    "準確性比較需要人工評估"
+  ],
+  "thesis_recommendations": [
+    "重點討論硬體限制對CAG性能的影響",
+    "解釋為什麼CAG在理論上更準確，但實際上受限",
+    "展示RAG的實用優勢（完整數據存取）",
+    "提出未來研究方向（更大模型、更好硬體）"
+  ]
+}
