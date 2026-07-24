@@ -19,6 +19,7 @@ import argparse
 import json
 import csv
 import re
+import sys
 from dataclasses import dataclass
 from itertools import permutations
 from pathlib import Path
@@ -27,6 +28,10 @@ from typing import Iterable
 import numpy as np
 import requests
 from openpyxl import load_workbook
+
+BASE_DIR = Path(__file__).resolve().parent
+if str(BASE_DIR) not in sys.path:
+    sys.path.insert(0, str(BASE_DIR))
 
 from xrag_generation_legal import (
     build_strict_facts_prompt,
@@ -42,16 +47,16 @@ from xrag_generation_sections import (
 )
 
 
-BASE_DIR = Path(__file__).resolve().parent
-QUERY_FILE = Path("/home/aru/AI_LAW/測試用50筆_0512.xlsx")
+QUERY_FILE = Path("/home/aru/AI_LAW/測試用50筆_0519.xlsx")
 CASE_FILE = BASE_DIR / "phase1_boolean_severity_v1.jsonl"
 LINKS_FILE = BASE_DIR / "experiment_outputs" / "experiment_links.csv"
+SEVERITY_TREE_LINKS_FILE = BASE_DIR / "experiment_outputs" / "severity_trees" / "severity_tree_parent_links_lambda_0p50.csv"
 OUTPUT_DIR = BASE_DIR / "generation_outputs"
 LLM_URL = "http://localhost:11434/api/generate"
 DEFAULT_MODEL = "gemma3:27b"
 
 WEIGHT_PERMUTATIONS = sorted(set(permutations((0.5, 0.3, 0.2), 3)), reverse=True)
-DISTANCE_THRESHOLDS = [0.075, 0.100, 0.125]
+DISTANCE_THRESHOLDS = [0.100, 0.250, 0.500]
 LITIGANT_DISTANCE_WEIGHT = 0.1
 
 GROSS_NEG_PATTERNS = [
@@ -117,9 +122,9 @@ COMP_SCORE = {"A": 1.0, "B": 0.75, "C": 0.5, "D": 0.25, "N": 0.0}
 INSURANCE_DEDUCTION_PENALTY = 0.2
 
 TAU_CODE_BY_VALUE = {
-    0.075: "L",
-    0.100: "M",
-    0.125: "H",
+    0.100: "L",
+    0.250: "M",
+    0.500: "H",
 }
 
 WEIGHT_CODE_BY_VALUES = {
@@ -180,14 +185,16 @@ def iter_records(path: Path) -> Iterable[dict]:
                 yield json.loads(line)
 
 
-def load_case_corpus() -> tuple[list[dict], np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+def load_case_corpus(case_limit: int | None = None) -> tuple[list[dict], np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
     rows = []
     litigant_values = []
     fact_values = []
     injury_values = []
     comp_values = []
     case_sort = []
-    for rec in iter_records(CASE_FILE):
+    for idx, rec in enumerate(iter_records(CASE_FILE)):
+        if case_limit is not None and idx >= case_limit:
+            break
         rows.append(rec)
         litigants = rec["boolean_matrix"]["litigants"]
         litigant_values.append([
@@ -222,6 +229,29 @@ def load_parent_map(exp_id: str) -> dict[str, str]:
             if row["exp_id"] == exp_id and row["link_type"] == "parent":
                 parent_map[str(row["target_case_id"])] = str(row["source_case_id"])
     return parent_map
+
+
+def load_severity_tree_parent_maps(exp_id: str) -> tuple[dict[str, str], dict[str, str]]:
+    lh_parent_map: dict[str, str] = {}
+    hl_parent_map: dict[str, str] = {}
+    if not SEVERITY_TREE_LINKS_FILE.exists():
+        return lh_parent_map, hl_parent_map
+    with SEVERITY_TREE_LINKS_FILE.open("r", encoding="utf-8", newline="") as f:
+        reader = csv.DictReader(f)
+        for row in reader:
+            if row["exp_id"] != exp_id:
+                continue
+            parent_map = lh_parent_map if row["direction"] == "LH" else hl_parent_map
+            parent_map[str(row["child_case_id"])] = str(row["parent_case_id"])
+    return lh_parent_map, hl_parent_map
+
+
+def filter_parent_map(parent_map: dict[str, str], case_ids: set[str]) -> dict[str, str]:
+    return {
+        child_id: parent_id
+        for child_id, parent_id in parent_map.items()
+        if child_id in case_ids and parent_id in case_ids
+    }
 
 
 def build_child_map(parent_map: dict[str, str]) -> dict[str, list[str]]:
@@ -291,20 +321,27 @@ def get_experiment_tree_context(
     comp_values: np.ndarray,
 ) -> ExperimentTreeContext:
     exp_id = exp["exp_id"]
-    cached = EXPERIMENT_TREE_CACHE.get(exp_id)
+    cache_key = f"{exp_id}|{len(case_ids)}|{case_ids[0] if case_ids else ''}|{case_ids[-1] if case_ids else ''}|{SEVERITY_TREE_LINKS_FILE}"
+    cached = EXPERIMENT_TREE_CACHE.get(cache_key)
     if cached is not None:
         return cached
 
-    heavy_parent_map = load_parent_map(exp_id)
-    light_parent_map = compute_reverse_parent_map(
-        exp,
-        case_ids,
-        case_sort,
-        litigant_values,
-        fact_values,
-        injury_values,
-        comp_values,
-    )
+    light_parent_map, heavy_parent_map = load_severity_tree_parent_maps(exp_id)
+    case_id_set = set(case_ids)
+    light_parent_map = filter_parent_map(light_parent_map, case_id_set)
+    heavy_parent_map = filter_parent_map(heavy_parent_map, case_id_set)
+    if not light_parent_map or not heavy_parent_map:
+        heavy_parent_map = load_parent_map(exp_id)
+        heavy_parent_map = filter_parent_map(heavy_parent_map, case_id_set)
+        light_parent_map = compute_reverse_parent_map(
+            exp,
+            case_ids,
+            case_sort,
+            litigant_values,
+            fact_values,
+            injury_values,
+            comp_values,
+        )
     context = ExperimentTreeContext(
         exp_id=exp_id,
         heavy_parent_map=heavy_parent_map,
@@ -312,7 +349,7 @@ def get_experiment_tree_context(
         light_parent_map=light_parent_map,
         light_child_map=build_child_map(light_parent_map),
     )
-    EXPERIMENT_TREE_CACHE[exp_id] = context
+    EXPERIMENT_TREE_CACHE[cache_key] = context
     return context
 
 
@@ -336,7 +373,9 @@ def load_queries(path: Path) -> list[dict]:
             "category": current_category,
             "query_id": int(query_id),
             "query_text": str(query_text),
-            "reference_text": str(row[idx["Ground Truth-gpt-4o-mini"]] or ""),
+            "reference_text": str(row[idx["Ground Truth-人工起訴書"]] or ""),
+            "ground_truth_text": str(row[idx["Ground Truth-人工起訴書"]] or ""),
+            "gpt_baseline_text": str(row[idx["gpt-4o-mini"]] or ""),
         })
     return items
 
@@ -604,8 +643,9 @@ def retrieve_dual_tree_cases(
     anchor_idx = int(ordered_global_idx[0])
     anchor_case_id = str(corpus_rows[anchor_idx]["case_id"])
 
-    lighter_target = top_k // 2
-    heavier_target = top_k - lighter_target
+    directional_target = max(top_k - 1, 0)
+    lighter_target = directional_target // 2
+    heavier_target = directional_target - lighter_target
 
     lighter_case_ids = collect_descendant_cases(
         anchor_case_id,
@@ -622,7 +662,7 @@ def retrieve_dual_tree_cases(
         case_idx_by_id,
     )
 
-    selected_case_ids: list[tuple[str, str]] = []
+    selected_case_ids: list[tuple[str, str]] = [(anchor_case_id, "anchor")]
     seen = {anchor_case_id}
     for cid in lighter_case_ids:
         if cid not in seen:
@@ -874,8 +914,12 @@ def run_generation_for_query(
         "lighter_candidates": retrieval_meta["lighter_candidates"],
         "heavier_candidates": retrieval_meta["heavier_candidates"],
         "query_text": query_row["query_text"],
-        "silver_reference_text": query_row["reference_text"],
-        "reference_text": query_row["reference_text"],
+        "silver_reference_text": query_row["ground_truth_text"],
+        "legacy_silver_reference_text": query_row["ground_truth_text"],
+        "reference_text": query_row["ground_truth_text"],
+        "human_reference_text": query_row["ground_truth_text"],
+        "ground_truth_text": query_row["ground_truth_text"],
+        "gpt_baseline_text": query_row["gpt_baseline_text"],
         "similar_cases": similar_cases,
         "parent_map": tree_context.heavy_parent_map,
         "reverse_parent_map": tree_context.light_parent_map,
@@ -918,6 +962,10 @@ def save_batch_outputs(records: list[dict], output_stem: str) -> tuple[Path, Pat
         "model",
         "query_text",
         "silver_reference_text",
+        "legacy_silver_reference_text",
+        "human_reference_text",
+        "ground_truth_text",
+        "gpt_baseline_text",
         "facts_section",
         "laws_section",
         "damages_section",
@@ -964,6 +1012,10 @@ def rewrite_progress_csv(path: Path, records: list[dict]) -> None:
         "model",
         "query_text",
         "silver_reference_text",
+        "legacy_silver_reference_text",
+        "human_reference_text",
+        "ground_truth_text",
+        "gpt_baseline_text",
         "facts_section",
         "laws_section",
         "damages_section",
@@ -1005,9 +1057,22 @@ def build_default_output_stem(exp: dict | None, top_k: int, all_queries: bool, a
     return f"xrag_run_topk{top_k}"
 
 
+def parse_query_ids_arg(query_ids_arg: str | None) -> list[int]:
+    if not query_ids_arg:
+        return []
+    query_ids: list[int] = []
+    for part in query_ids_arg.split(","):
+        part = part.strip()
+        if not part:
+            continue
+        query_ids.append(int(part))
+    return query_ids
+
+
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--query-id", type=int, default=1)
+    parser.add_argument("--query-ids", default="", help="Comma-separated query_ids, e.g. 3,17,27")
     parser.add_argument("--exp-id", default="E05")
     parser.add_argument("--top-k", type=int, default=3)
     parser.add_argument("--model", default=DEFAULT_MODEL)
@@ -1022,8 +1087,15 @@ def main() -> None:
     target_experiments = select_target_experiments(None if args.all_experiments else args.exp_id)
     corpus_by_id = {str(rec["case_id"]): rec for rec in corpus_rows}
     case_idx_by_id = {str(rec["case_id"]): idx for idx, rec in enumerate(corpus_rows)}
+    requested_query_ids = parse_query_ids_arg(args.query_ids)
     if args.all_queries:
         target_queries = queries
+    elif requested_query_ids:
+        query_by_id = {row["query_id"]: row for row in queries}
+        missing = [qid for qid in requested_query_ids if qid not in query_by_id]
+        if missing:
+            raise ValueError(f"query_ids {missing} not found in {QUERY_FILE}")
+        target_queries = [query_by_id[qid] for qid in requested_query_ids]
     else:
         query_row = next((row for row in queries if row["query_id"] == args.query_id), None)
         if query_row is None:
@@ -1104,7 +1176,11 @@ def main() -> None:
                     "top_k": args.top_k,
                     "model": args.model,
                     "query_text": query_row["query_text"],
-                    "silver_reference_text": query_row["reference_text"],
+                    "silver_reference_text": query_row["ground_truth_text"],
+                    "legacy_silver_reference_text": query_row["ground_truth_text"],
+                    "human_reference_text": query_row["ground_truth_text"],
+                    "ground_truth_text": query_row["ground_truth_text"],
+                    "gpt_baseline_text": query_row["gpt_baseline_text"],
                     "facts_section": "",
                     "laws_section": "",
                     "damages_section": "",

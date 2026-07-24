@@ -1,0 +1,484 @@
+口試 PPT 文字與公式需更新清單（依最新論文版本）
+檔案：/home/aru/AI_LAW/口試-0723.pdf
+檢查日期：2026-07-22
+
+本版只整理「內容是否舊版、公式是否需要改、投影片上應如何精簡修改」。
+不處理粗體/非粗體這類排版問題。
+
+============================================================
+總原則：PPT 要同步的最新版 SDKG 口徑
+============================================================
+
+1. 不要再寫兩側各 k/2。
+   最新說法：LH/HL 兩棵樹先形成候選節點，再於 top-k budget 內依
+   d_{q,j}^{p,\ell} 選取。
+
+2. 不要再用 k_{LH}, k_{HL} 作正式方向配額。
+   最新說法：若某一方向沒有可比較候選，不強迫該方向回傳案例。
+
+3. 不要再把 \Delta_{i,j}^{p} 當正式公式符號。
+   最新說法：LH/HL 方向由兩節點的 weighted severity 高低決定。
+
+4. Anchor mapping 要強調 query 不插入圖。
+   最新說法：query \mathbf{q} 先映射到最近既有案件 a(c_i,\mathbf{q})，
+   對應節點 n_i 作為局部檢索起點。
+
+5. E^{p,u,\ell} 不只是距離小於 tau。
+   最新說法：兩節點要同時滿足：
+   - d_{i,j}^{p,\ell}\leq\tau^u
+   - 在主導特徵群中至少共享一個 boolean feature。
+
+6. Baseline Method 要出現在實驗與結論中。
+   最新說法：Baseline Method 高於 TAARN，但低於所有 SDKG；
+   代表 paragraph/sentence summary retrieval 有幫助，但不如
+   severity-aware case-level retrieval。
+
+7. top-k 寫法：
+   - 一般寫 top-k
+   - 固定值寫 top-8、top-1
+   - 不要寫 Top-K、Top-k、top-k = 8。
+
+============================================================
+逐頁修正建議
+============================================================
+
+第 6 頁 Introduction：總架構圖
+
+目前舊版內容：
+- Dual-Tree Retrieval 區塊有 k/2、k/2。
+- 圖中寫 Top-k Structured Summaries。
+
+建議投影片改法：
+- 移除 k/2。
+- 改成：
+  LH/HL candidates
+  ↓
+  top-k Retrieved References
+
+建議簡短說法：
+“SDKG retrieves available LH/HL candidates under a top-k budget, without forcing a fixed k/2 split.”
+
+------------------------------------------------------------
+
+第 11 頁 Related Work / overview diagram
+
+目前舊版內容：
+- 圖中寫 Proposed DKG Scheme。
+- 圖中權重寫 1-\alpha-\beta。
+- 圖中寫 Top-K Structured Summaries。
+
+建議投影片改法：
+- Proposed DKG Scheme 改成 Proposed SDKG Scheme。
+- 1-\alpha-\beta 改成 1-\alpha^p-\beta^p。
+- Top-K Structured Summaries 改成 top-k Retrieved References。
+
+建議簡短說法：
+“SDKG uses legal features and severity weights to construct comparable case-level references.”
+
+------------------------------------------------------------
+
+第 12 頁 Comparison with Existing Result
+
+目前舊版內容：
+- SDKG 圖中仍有 k/2。
+
+建議投影片改法：
+- 移除 k/2。
+- 改成 top-k budget 或 top-k Relevant Cases。
+
+建議簡短說法：
+“SDKG does not require balanced retrieval from both directions; it selects available comparable cases within the top-k budget.”
+
+------------------------------------------------------------
+
+第 14 頁 System Model
+
+目前舊版內容：
+- 用 \Delta_{i,j}^{p}>0 或 \Delta_{i,j}^{p}<0 表示 LH/HL 方向。
+
+為何需要改：
+- 最新版不把 \Delta_{i,j}^{p} 當正式符號。
+
+建議投影片改法：
+- 移除 \Delta 公式。
+- 改成兩句：
+  LH: from lower weighted severity to higher weighted severity.
+  HL: from higher weighted severity to lower weighted severity.
+
+若圖中空間有限，可只寫：
+“Direction is determined by weighted severity order.”
+
+------------------------------------------------------------
+
+第 15 頁 Case Representation Model
+
+目前內容大致可保留。
+
+建議小修：
+- 若要更貼近論文，可把公式改成：
+  c_i=(m_i,f_i,s_i)
+  metadata/text, legal features, severity scores
+
+不需要特別修粗體。
+
+------------------------------------------------------------
+
+第 18 頁 Light-Heavy and Heavy-Light Tree Construction Model
+
+目前內容大致正確：
+- d_{i,j}^{p,\ell}=\lambda^\ell d_f+(1-\lambda^\ell)d_s^p 是新版方向。
+
+建議補一句：
+“Edges are constructed only when the distance threshold and dominant-feature sharing condition are both satisfied.”
+
+------------------------------------------------------------
+
+第 19 頁 Query-Time Retrieval and Generation Model
+
+目前舊版內容：
+- 文字說 closest case is retrieved by d_{i,j}^{p,\ell}。
+
+應改為：
+- query-to-case distance 應是 d_{q,i}^{p,\ell}。
+
+建議投影片改法：
+“The closest anchor case is selected by the query-mapping distance d_{q,i}^{p,\ell}.”
+
+------------------------------------------------------------
+
+第 20 頁 Problem Formulation
+
+目前舊版內容：
+- 寫 d_{i,j}^{p,\ell} 作 query-mapping distance。
+- 使用 A_{LH}(n_i), A_{HL}(n_i)。
+
+為何需要改：
+- Query mapping 應是 d_{q,i}^{p,\ell}。
+- A_{LH}(n_i), A_{HL}(n_i) 已不是最新版正式符號。
+
+建議投影片改法：
+- 刪除 A_{LH}(n_i), A_{HL}(n_i) 兩行。
+- 改成：
+  1. Map query q to anchor case a(c_i,q).
+  2. Use anchor node n_i to initialize LH/HL retrieval trees.
+  3. Select references from available candidates under the top-k budget.
+
+------------------------------------------------------------
+
+第 21 頁 Basic Idea
+
+目前舊版內容：
+- 圖中寫 1-\alpha-\beta。
+- 圖中寫 Top-k Relevant Cases。
+
+建議投影片改法：
+- 1-\alpha-\beta 改成 1-\alpha^p-\beta^p。
+- Top-k Relevant Cases 改成 top-k Relevant Cases。
+
+------------------------------------------------------------
+
+第 27 頁 Sentence-Level-Aware Dual Retrieval Method 總圖
+
+目前舊版內容：
+- Top-K case_id
+- Top-K case_id by Sentence Hits
+- Top-K Similar Paragraphs
+- Top-1 Indictment
+
+建議投影片改法：
+- Top-K 改 top-k。
+- Top-1 改 top-1。
+
+此頁是第四章 Baseline Method，可以保留 paragraph/sentence retrieval 與
+vector database 的流程，不需要改成 SDKG。
+
+------------------------------------------------------------
+
+第 30–31 頁 Vector database construction
+
+目前內容：
+- 仍在講 Graph Database / Vector Database / Elasticsearch。
+
+是否需要改：
+- 如果第四章現在定位為 Baseline Method，這些內容可以保留。
+- 但建議投影片上要明確說這是 Baseline Method，不是最終 SDKG。
+
+建議補一句：
+“This baseline retrieves paragraph and sentence summaries before the later case-level SDKG design.”
+
+------------------------------------------------------------
+
+第 34 頁 Dual-Level Summary-Based Semantic Retrieval
+
+目前舊版內容：
+- Top-K case_id
+- Top-K case_id by Sentence Hits
+
+建議投影片改法：
+- 改成 top-k case IDs。
+- 改成 top-k case IDs by sentence hits。
+
+------------------------------------------------------------
+
+第 42 頁 Phase 3: Prompt Assembly, Generation, and Transition
+
+目前舊版內容：
+- Top-K Similar Paragraphs
+- Top-1 Indictment
+
+建議投影片改法：
+- 改成 top-k Similar Paragraphs。
+- 改成 top-1 Indictment。
+
+建議補一句銜接：
+“This baseline motivates the shift from sentence-level retrieval to case-level SDKG retrieval.”
+
+------------------------------------------------------------
+
+第 45 頁 SDKG architecture 圖
+
+目前舊版內容：
+- Dual-Tree Retrieval 中仍有 k/2、k/2。
+- 圖中寫 Top-k Structured Summaries。
+
+建議投影片改法：
+- 移除 k/2。
+- 改成：
+  LH/HL candidates
+  ↓
+  top-k Retrieved References
+
+這頁是第五章主架構圖，優先度很高。
+
+------------------------------------------------------------
+
+第 48 頁 Case Node Construction
+
+目前可能不一致：
+- 方法頁中直接寫 N=6,057。
+
+建議投影片改法：
+- 若此頁是方法說明，不要把方法限制成 6,057。
+- 可改成：
+  “For each observed case c_i in D, construct legal features f_i and severity scores s_i.”
+
+6,057 留到 experiment setup 頁即可。
+
+------------------------------------------------------------
+
+第 57 頁 Relation construction
+
+目前舊版/錯誤內容：
+- dominant feature group 條件三行看起來都寫成 b_{i,F}\cdot b_{j,F}>0。
+- E relation 的共同特徵條件容易被老師看不懂。
+
+建議投影片改法：
+- 不要用三行複雜公式。
+- 改成兩個條件：
+  A comparable edge is constructed only if:
+  1. d_{i,j}^{p,\ell}\leq\tau^u
+  2. The two cases share at least one boolean feature in the dominant feature group.
+
+主導特徵群用文字補：
+“The dominant feature group is determined by the largest severity weight among
+\alpha^p, \beta^p, and 1-\alpha^p-\beta^p.”
+
+------------------------------------------------------------
+
+第 58 頁 E^{p,u,\ell}
+
+目前舊版內容：
+- E^{p,u,\ell} 只寫距離門檻。
+- 缺少 dominant feature sharing condition。
+
+建議投影片改法：
+- 公式可簡化為：
+  E^{p,u,\ell}: distance threshold + dominant-feature sharing
+- 或文字：
+  “E^{p,u,\ell} contains node pairs satisfying both the distance threshold and the dominant-feature sharing condition.”
+
+------------------------------------------------------------
+
+第 60 頁 Anchor Mapping
+
+目前舊版/錯誤內容：
+- arg min 下標與距離下標不一致。
+- query mapping 應該用 d_{q,i}^{p,\ell}。
+
+建議投影片公式：
+a(c_i,q) \Longleftrightarrow
+c_i=\arg\min_{c_j\in D} d_{q,j}^{p,\ell}
+
+建議補一句：
+“The query is mapped to an existing case and is not inserted as a new node.”
+
+------------------------------------------------------------
+
+第 61 頁 Query-specific retrieval trees
+
+目前內容大致可保留。
+
+建議小修：
+- 初始化可簡化寫：
+  T_{LH}^{p,u,\ell}(q), T_{HL}^{p,u,\ell}(q) start from anchor node n_i.
+
+------------------------------------------------------------
+
+第 62 頁 Parent selection
+
+目前舊版內容：
+- 使用 A(n_j)。
+- 父節點選擇距離看起來不是最新版。
+
+建議投影片改法：
+- 刪除 A(n_j)。
+- 改成：
+  “If multiple reached nodes can connect to n_j, keep the parent h_j with the smallest d_{h,j}^{p,\ell}.”
+
+不一定要放完整公式。
+
+------------------------------------------------------------
+
+第 63 頁 Candidate/retrieval sets
+
+目前舊版內容：
+- C_{LH}(q), C_{HL}(q)。
+- R_{LH}(q), R_{HL}(q) 分別 arg min。
+- 使用 k_{LH}, k_{HL}。
+
+建議投影片改法：
+- 改成：
+  1. Form V_{LH}(q) and V_{HL}(q).
+  2. V_{SDKG}(q)=V_{LH}(q)\cup V_{HL}(q).
+  3. Select R(q) from V_{SDKG}(q) under the top-k budget.
+
+這頁要避免再寫兩側分開最佳化。
+
+------------------------------------------------------------
+
+第 64 頁 Directional retrieval budgets
+
+目前舊版內容：
+- k_{LH}=min(floor(k/2), ...)
+- k_{HL}=min(floor(k/2), ...)
+- |R_{LH}|=k_{LH}, |R_{HL}|=k_{HL}
+
+建議投影片改法：
+- 整頁建議重寫。
+- 新版簡短說法：
+  “SDKG does not force a fixed k/2 split. The final reference set R(q) is selected from all available LH/HL candidates within the top-k budget.”
+
+可補一句：
+“If one direction has no comparable candidates, no reference is forced from that direction.”
+
+------------------------------------------------------------
+
+第 68 頁 Prompt formula
+
+目前舊版內容：
+- 文字寫 three main inputs，但公式裡其實超過三項。
+- anchor 只寫 c_i。
+- 公式：
+  z = Phi(q,c_i,R_LH(q),R_HL(q),I)
+
+建議投影片改法：
+- 文字改成：
+  “The prompt assembler receives the query, anchor case, source-direction references, and drafting instructions.”
+- 公式改成：
+  z_{p,u,\ell}
+  =\Phi(q,a(c_i,q),R_{LH}(q),R_{HL}(q),I)
+
+若投影片要更精簡，可只寫：
+Prompt = query + anchor + LH/HL references + instructions
+
+------------------------------------------------------------
+
+第 69 頁 Prompt flow diagram
+
+目前舊版內容：
+- Retrieved Case Summary 中仍有 k/2+、k/2-。
+- anchor 寫 a(c_i)，缺 q。
+
+建議投影片改法：
+- 移除 k/2+、k/2-。
+- 改成：
+  Retrieved References under top-k budget
+  或
+  R_LH(q) + R_HL(q)
+- anchor 改成 a(c_i,q)。
+
+------------------------------------------------------------
+
+第 70 頁 Structured prompt table
+
+目前內容接近新版，但可更貼近：
+- Anchor case c_i 改成 Anchor case a(c_i,q)。
+- R_LH(q)、R_HL(q) 可以保留。
+
+建議修正句：
+“Anchor case a(c_i,q): nearest existing case selected by d_{q,i}^{p,\ell}.”
+
+------------------------------------------------------------
+
+第 73 頁 SDKG Parameter Settings
+
+目前舊版內容：
+- Table 中寫 Top-k。
+
+建議投影片改法：
+- 改成 top-k 或 top-k budget。
+
+------------------------------------------------------------
+
+第 78 頁 Human Evaluation
+
+目前正確部分：
+- 三條 SDKG 線是對的：
+  SDKG (\alpha=0.5,\beta=0.2,\lambda=0.5,\tau=0.5)
+  SDKG (\alpha=0.3,\beta=0.2,\lambda=0.5,\tau=0.5)
+  SDKG (\alpha=0.2,\beta=0.5,\lambda=0.5,\tau=0.5)
+
+需要更新部分：
+- 評分欄位和 Ch6 不一致。
+
+建議欄位改成：
+Fact Consistency
+Legal Basis
+Compensation Correctness
+Complaint Structure
+Overall Legal Usability
+Average Score
+
+下方 top-k: 8 建議改成：
+top-8
+
+------------------------------------------------------------
+
+第 86 頁 Conclusion
+
+目前舊版內容：
+- 寫 top-k = 8, alpha = 0.5, beta = 0.2, lambda = 0.5, tau = 0.5。
+- 沒有提 Baseline Method。
+
+建議投影片改法：
+- 改成：
+  “The best current setting is top-8 with
+  \alpha=0.5, \beta=0.2, \lambda=0.5, and \tau=0.5.”
+
+建議新增一點：
+“Baseline Method outperforms TAARN but remains below SDKG, showing that
+sentence-level retrieval is useful while case-level SDKG provides stronger comparability.”
+
+============================================================
+建議優先改的頁面
+============================================================
+
+第一優先：
+第 6、14、20、45、57、58、60、62、63、64、68、69、78、86 頁。
+
+第二優先：
+第 11、12、19、21、27、34、42、48、70、73 頁。
+
+可不急：
+第 15、16、18、51、52 頁。
+
