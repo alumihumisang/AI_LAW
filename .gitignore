@@ -1,4 +1,39 @@
 .codex/
+
+# Python/cache
 **/__pycache__/
 *.pyc
+.venv/
+venv/
+**/venv/
+
+# Secrets
+.env
+*.env
+**/.env
 new_kg/.env
+
+# Model/cache/runtime artifacts
+*.pt
+*.pkl
+*.log
+
+# Large experiment outputs
+new_kg/generation_outputs/
+new_kg/evaluation_outputs/
+new_kg/experiment_outputs/
+new_kg/run_logs/
+AI_CAG/*results*/
+AI_CAG/real_kvcache_test*/
+AI_CAG/data_cache/
+
+# Private source data and thesis/media drafts.
+# Use `git add -f` only after checking privacy and file size.
+*.xlsx
+*.xls
+*.docx
+*.pptx
+*.pdf
+*.png
+*.jpg
+*.jpeg
